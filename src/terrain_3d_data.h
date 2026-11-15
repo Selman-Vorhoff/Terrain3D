@@ -78,8 +78,30 @@ private:
 	GeneratedTexture _generated_control_maps;
 	GeneratedTexture _generated_color_maps;
 
+	// Barge Game addition: fixed slot pool ("streaming"), ported from the data layer of
+	// upstream draft PR #1004. See enable_streaming() in terrain_3d_data.cpp.
+	// While streaming, a region's id is a stable slot: its texture array layer and its index
+	// into _slot_locs. _region_locations stays the dense list of resident regions.
+	bool _streaming = false;
+	int _slot_capacity = 0;
+	Vector<int> _free_slots; // Free texture array layers, popped from the back
+	HashMap<Vector2i, int> _slot_of; // Region location -> slot
+	TypedArray<Vector2i> _slot_locs; // Slot -> location; the shader's per layer table
+	bool _pool_signals_pending = false; // Inserted or evicted with p_update = false
+	// Pool statistics, see get_streaming_stats()
+	uint64_t _pool_inserts = 0;
+	uint64_t _pool_evictions = 0;
+	uint64_t _pool_upload_usec_total = 0;
+	uint64_t _pool_upload_usec_last = 0;
+	uint64_t _pool_upload_usec_max = 0;
+	int64_t _pool_bytes_per_slot = 0;
+	Image::Format _pool_layer_format[3] = { Image::FORMAT_MAX, Image::FORMAT_MAX, Image::FORMAT_MAX }; // per MapType
+	bool _pool_layer_mipmaps[3] = { false, false, false };
+
 	// Functions
 	void _clear();
+	Error _pool_create_arrays(const Terrain3DRegion *p_region);
+	void _pool_emit_signals();
 	void _copy_paste_dfr(const Terrain3DRegion *p_src_region, const Rect2i &p_src_rect, const Rect2i &p_dst_rect, const Terrain3DRegion *p_dst_region);
 	Error _save_export_image(const MapType p_map_type, const Ref<Image> &p_img, const String &p_path, const String &p_ext) const;
 
@@ -91,6 +113,16 @@ public:
 	// Regions
 
 	int get_region_count() const { return _region_locations.size(); }
+	// Barge Game addition: slot pool streaming (see the members above)
+	void enable_streaming(const int p_slot_capacity);
+	bool is_streaming() const { return _streaming; }
+	int get_slot_capacity() const { return _slot_capacity; }
+	int get_free_slot_count() const { return _free_slots.size(); }
+	Error add_region_streamed(const Ref<Terrain3DRegion> &p_region, const bool p_update = true);
+	Error evict_region(const Vector2i &p_region_loc, const bool p_update = true);
+	// Slot indexed while streaming, the dense id ordered list otherwise. What the shader indexes by layer.
+	TypedArray<Vector2i> get_shader_region_locations() const { return _streaming ? _slot_locs : _region_locations; }
+	Dictionary get_streaming_stats() const;
 	void set_region_locations(const TypedArray<Vector2i> &p_locations);
 	TypedArray<Vector2i> get_region_locations() const { return _region_locations; }
 	TypedArray<Terrain3DRegion> get_regions_active(const bool p_copy = false, const bool p_deep = false) const;
@@ -237,7 +269,9 @@ inline int Terrain3DData::get_region_id(const Vector2i &p_region_loc) const {
 	int map_index = get_region_map_index(p_region_loc);
 	if (map_index >= 0) {
 		int region_id = _region_map[map_index] - 1; // 0 = no region
-		if (region_id >= 0 && region_id < _region_locations.size()) {
+		// While streaming, ids are slots, sparse up to capacity. Evicting zeroes the map
+		// entry, so a non-zero entry is a resident region.
+		if (region_id >= 0 && region_id < (_streaming ? _slot_capacity : (int)_region_locations.size())) {
 			return region_id;
 		}
 	}

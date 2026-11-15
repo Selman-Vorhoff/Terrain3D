@@ -382,6 +382,26 @@ void Terrain3DInstancer::_destroy_mmi_by_mesh(const int p_mesh_id) {
 	}
 }
 
+// Barge Game addition, from upstream draft PR #1004. Frees a region's MMIs without touching
+// its instance data. Streaming eviction uses this: the data leaves with the region, only the
+// rendering side must go, and the per region update path needs a live region.
+void Terrain3DInstancer::destroy_mmis_by_region(const Vector2i &p_region_loc) {
+	IS_INIT(VOID);
+	int mesh_count = _terrain->get_assets().is_valid() ? _terrain->get_assets()->get_mesh_count() : 0;
+	for (int mesh_id = 0; mesh_id < mesh_count; mesh_id++) {
+		_destroy_mmi_by_location(p_region_loc, mesh_id);
+	}
+	// Drop updates queued for this region (by an insert earlier in the frame); processing
+	// them after the region is gone only warns about a null region.
+	for (auto it = _queued_updates.begin(); it != _queued_updates.end();) {
+		if (it->first == p_region_loc) {
+			it = _queued_updates.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
 void Terrain3DInstancer::_destroy_mmi_by_location(const Vector2i &p_region_loc, const int p_mesh_id) {
 	LOG(DEBUG, "Deleting all MMIs in region: ", p_region_loc, " for mesh_id: ", p_mesh_id);
 	// Identify cells with matching mesh_id

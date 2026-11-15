@@ -56,10 +56,12 @@ void Terrain3D::_initialize() {
 		LOG(DEBUG, "Connecting _data::region_map_changed signal to set_show_region_locations()");
 		_data->connect("region_map_changed", callable_mp(this, &Terrain3D::update_region_labels));
 	}
-	// Any region was changed, regenerate collision if enabled
-	if (!_data->is_connected("region_map_changed", callable_mp(_collision, &Terrain3DCollision::build))) {
-		LOG(DEBUG, "Connecting _data::region_map_changed signal to build()");
-		_data->connect("region_map_changed", callable_mp(_collision, &Terrain3DCollision::build));
+	// Any region was changed, regenerate collision if enabled.
+	// Barge Game addition: through _on_region_map_changed, which skips the full build while
+	// streaming (the pool refreshes collision in place).
+	if (!_data->is_connected("region_map_changed", callable_mp(this, &Terrain3D::_on_region_map_changed))) {
+		LOG(DEBUG, "Connecting _data::region_map_changed signal to _on_region_map_changed()");
+		_data->connect("region_map_changed", callable_mp(this, &Terrain3D::_on_region_map_changed));
 	}
 	// Any map was regenerated or regions changed, update material uniforms without rebuilding shaders
 	if (!_data->is_connected("maps_changed", callable_mp(_material.ptr(), &Terrain3DMaterial::update).bind(Terrain3DMaterial::REGION_ARRAYS))) {
@@ -274,6 +276,16 @@ void Terrain3D::_build_containers() {
 	_label_parent = memnew(Node3D);
 	_label_parent->set_name("Labels");
 	add_child(_label_parent, true);
+}
+
+// Barge Game addition. Stock connects region_map_changed straight to collision build(). While
+// streaming, regions come and go every few frames and a full build would recreate the
+// physics body under the players, so Terrain3DData refreshes collision in place instead.
+void Terrain3D::_on_region_map_changed() {
+	if (_collision == nullptr || (_data != nullptr && _data->is_streaming())) {
+		return;
+	}
+	_collision->build();
 }
 
 void Terrain3D::_destroy_containers() {

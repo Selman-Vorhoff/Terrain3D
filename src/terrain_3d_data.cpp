@@ -6,6 +6,7 @@
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/resource_saver.hpp>
+#include <godot_cpp/classes/time.hpp>
 
 #include "logger.h"
 #include "terrain_3d_data.h"
@@ -16,6 +17,13 @@
 
 void Terrain3DData::_clear() {
 	LOG(INFO, "Clearing data");
+	_streaming = false;
+	_slot_capacity = 0;
+	_free_slots.clear();
+	_slot_of.clear();
+	_slot_locs.clear();
+	_pool_signals_pending = false;
+	_pool_bytes_per_slot = 0;
 	_region_map_dirty = true;
 	_region_map.clear();
 	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
@@ -104,6 +112,10 @@ void Terrain3DData::initialize(Terrain3D *p_terrain) {
 }
 
 void Terrain3DData::set_region_locations(const TypedArray<Vector2i> &p_locations) {
+	if (_streaming) { // Barge Game addition: the pool owns membership while streaming
+		LOG(ERROR, "set_region_locations is not supported while streaming");
+		return;
+	}
 	SET_IF_DIFF(_region_locations, p_locations);
 	LOG(INFO, "Setting _region_locations with array sized: ", p_locations.size());
 	_region_map_dirty = true;
@@ -153,6 +165,10 @@ void Terrain3DData::change_region_size(int p_new_size) {
 	LOG(INFO, "Changing region size from: ", _region_size, " to ", p_new_size);
 	if (!is_valid_region_size(p_new_size)) {
 		LOG(ERROR, "Invalid region size: ", p_new_size, ". Must be power of 2, 64-2048");
+		return;
+	}
+	if (_streaming) { // Barge Game addition: pool layers are allocated at one size
+		LOG(ERROR, "change_region_size is not supported while streaming");
 		return;
 	}
 	if (p_new_size == _region_size) {
@@ -278,6 +294,10 @@ Error Terrain3DData::add_region(const Ref<Terrain3DRegion> &p_region, const bool
 		LOG(ERROR, "Provided region is null. Returning");
 		return FAILED;
 	}
+	// Barge Game addition: while streaming, regions take a slot instead of a full rebuild
+	if (_streaming) {
+		return add_region_streamed(p_region, p_update);
+	}
 	Vector2i region_loc = p_region->get_location();
 	LOG(INFO, "Adding region at location ", region_loc, ", update maps: ", p_update ? "yes" : "no");
 
@@ -346,6 +366,11 @@ void Terrain3DData::remove_region(const Ref<Terrain3DRegion> &p_region, const bo
 		return;
 	}
 
+	// Barge Game addition: while streaming, removing a region evicts it from its slot
+	if (_streaming) {
+		evict_region(p_region->get_location(), p_update);
+		return;
+	}
 	Vector2i region_loc = p_region->get_location();
 	int region_id = _region_locations.find(region_loc);
 	LOG(INFO, "Marking region ", region_loc, " for deletion. update_maps: ", p_update ? "yes" : "no");
@@ -417,6 +442,10 @@ void Terrain3DData::load_directory(const String &p_dir) {
 		return;
 	}
 
+	if (_streaming) { // Barge Game addition: load_directory clears all data, including the pool
+		LOG(ERROR, "load_directory is not supported while streaming; use load_region or add_region");
+		return;
+	}
 	LOG(INFO, "Loading region files from ", p_dir);
 	PackedStringArray files = Util::get_files(p_dir, "terrain3d*.res");
 	if (files.size() == 0) {
@@ -514,6 +543,248 @@ TypedArray<Image> Terrain3DData::get_maps(const MapType p_map_type) const {
 	return TypedArray<Image>();
 }
 
+///////////////////////////
+// Region Streaming (slot pool)
+// Barge Game addition, ported from the data layer of upstream draft PR #1004
+///////////////////////////
+
+// Switches this data object to slot pool streaming. Classically region_id doubles as the
+// texture array layer and the position in _region_locations, re-enumerated on every
+// membership change, which forces a full texture array rebuild (and a collision rebuild)
+// per add or remove. While streaming, a region checks out a stable slot from a fixed
+// capacity pool instead: the region map stores slot + 1, and add/evict touch one texture
+// layer per map type and one region map entry. The arrays are allocated once, at the
+// first insert, sized to the capacity.
+// Differences from #1004: no disk streamer (our game produces regions in memory and calls
+// add_region / remove_region itself, which route here); the arrays take their formats from
+// the first region, so compressed colour maps work; signals can be batched with p_update.
+// Must be called on an empty data object, at runtime (not in the editor).
+void Terrain3DData::enable_streaming(const int p_slot_capacity) {
+	ERR_FAIL_NULL(_terrain);
+	ERR_FAIL_COND_MSG(IS_EDITOR, "Region streaming is runtime only; the editor tools assume dense region ids");
+	ERR_FAIL_COND_MSG(!_regions.is_empty(), "enable_streaming must run before any region is added");
+	ERR_FAIL_COND_MSG(_streaming, "Streaming is already enabled");
+	// The shader bounds layers by the material's max_regions and indexes the fixed size
+	// _region_locations uniform, so the pool cannot be larger.
+	int max_regions = 1024;
+	Ref<Terrain3DMaterial> material = _terrain->get_material();
+	if (material.is_valid()) {
+		max_regions = int(material->get_max_regions());
+	}
+	ERR_FAIL_COND_MSG(p_slot_capacity < 1 || p_slot_capacity > max_regions,
+			vformat("Slot capacity %d must be 1 to %d (Terrain3DMaterial.max_regions)", p_slot_capacity, max_regions));
+	_region_size = _terrain->get_region_size();
+	_region_sizev = V2I(_region_size);
+	_streaming = true;
+	_slot_capacity = p_slot_capacity;
+	_free_slots.clear();
+	_slot_of.clear();
+	_slot_locs.clear();
+	_slot_locs.resize(_slot_capacity);
+	for (int i = _slot_capacity - 1; i >= 0; i--) {
+		_free_slots.push_back(i); // slot 0 is handed out first
+		_slot_locs[i] = V2I_MAX;
+	}
+	_generated_height_maps.clear();
+	_generated_control_maps.clear();
+	_generated_color_maps.clear();
+	_region_map.clear();
+	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
+	_region_map_dirty = false;
+	_pool_inserts = _pool_evictions = 0;
+	_pool_upload_usec_total = _pool_upload_usec_last = _pool_upload_usec_max = 0;
+	_pool_bytes_per_slot = 0;
+	LOG(INFO, "Streaming enabled: ", _slot_capacity, " slots of ", _region_size, " px");
+	emit_signal("region_map_changed");
+	emit_signal("maps_changed");
+}
+
+// Allocates the three texture arrays at full capacity. Every layer starts as a copy of the
+// first region's maps, so formats, sizes and mipmaps match whatever that region carries
+// (for example a compressed colour map). Unused layers are never reachable: their map
+// entries are 0.
+Error Terrain3DData::_pool_create_arrays(const Terrain3DRegion *p_region) {
+	Ref<Image> maps[3] = { p_region->get_height_map(), p_region->get_control_map(), p_region->get_active_color_map() };
+	TypedArray<Image> layers[3];
+	_pool_bytes_per_slot = 0;
+	for (int t = 0; t < 3; t++) {
+		if (maps[t].is_null() || maps[t]->is_empty()) {
+			LOG(ERROR, "Region ", p_region->get_location(), " has no usable map of type ", TYPESTR[t]);
+			return FAILED;
+		}
+		_pool_bytes_per_slot += maps[t]->get_data_size();
+		for (int i = 0; i < _slot_capacity; i++) {
+			layers[t].push_back(maps[t]);
+		}
+	}
+	_generated_height_maps.create(layers[TYPE_HEIGHT]);
+	_generated_control_maps.create(layers[TYPE_CONTROL]);
+	_generated_color_maps.create(layers[TYPE_COLOR]);
+	for (int t = 0; t < 3; t++) {
+		_pool_layer_format[t] = maps[t]->get_format();
+		_pool_layer_mipmaps[t] = maps[t]->has_mipmaps();
+	}
+	LOG(INFO, "Streaming pool allocated: ", _slot_capacity, " slots, about ",
+			(_pool_bytes_per_slot * _slot_capacity) / (1024 * 1024), " MB of texture memory");
+	return OK;
+}
+
+// Inserts one region into a free slot: one texture layer upload per map type and one
+// region map entry. With p_update = false the signals (material uniforms, mesher AABBs,
+// collision refresh) are held back until update_maps() is called, for bulk inserts.
+Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, const bool p_update) {
+	ERR_FAIL_COND_V(!_streaming, FAILED);
+	ERR_FAIL_COND_V(p_region.is_null(), FAILED);
+	Vector2i loc = p_region->get_location();
+	int map_index = get_region_map_index(loc);
+	ERR_FAIL_COND_V_MSG(map_index < 0, FAILED, vformat("Region location %s is out of bounds", loc));
+	ERR_FAIL_COND_V_MSG(p_region->get_region_size() != _region_size, FAILED,
+			vformat("Region %s is %d px but the pool is %d px", loc, p_region->get_region_size(), _region_size));
+	bool replacing = _slot_of.has(loc);
+	if (!replacing && _free_slots.is_empty()) {
+		LOG(ERROR, "Slot pool exhausted (", _slot_capacity, " slots); cannot add region ", loc,
+				". Evict regions first or enable streaming with more slots.");
+		return ERR_OUT_OF_MEMORY;
+	}
+	p_region->sanitize_maps();
+	// Same colour map handling as add_region at runtime: free the copy that is not needed.
+	const CompressMode mode = _terrain->get_color_compress_mode();
+	if (mode == COMPRESS_NONE) {
+		p_region->clear_compressed_color_map();
+	} else if (!_terrain->get_keep_uncompressed_color() && p_region->is_color_compressed()) {
+		p_region->clear_color_map();
+	}
+
+	Ref<Image> maps[3] = { p_region->get_height_map(), p_region->get_control_map(), p_region->get_active_color_map() };
+	if (!_generated_height_maps.get_rid().is_valid()) {
+		if (_pool_create_arrays(p_region.ptr()) != OK) {
+			return FAILED;
+		}
+	} else {
+		// texture_2d_update needs the exact layer format, size and mipmap state.
+		for (int t = 0; t < 3; t++) {
+			if (maps[t].is_null() || maps[t]->is_empty() || maps[t]->get_format() != _pool_layer_format[t] ||
+					maps[t]->get_size() != _region_sizev || maps[t]->has_mipmaps() != _pool_layer_mipmaps[t]) {
+				LOG(ERROR, "Region ", loc, " ", TYPESTR[t], " map does not match the pool's format, size or mipmaps");
+				return FAILED;
+			}
+		}
+	}
+
+	int slot;
+	if (replacing) {
+		slot = _slot_of[loc];
+		LOG(INFO, "Replacing resident region at ", loc, " in slot ", slot);
+	} else {
+		slot = _free_slots[_free_slots.size() - 1];
+		_free_slots.remove_at(_free_slots.size() - 1);
+		_slot_of[loc] = slot;
+		_slot_locs[slot] = loc;
+	}
+	p_region->set_deleted(false);
+	_regions[loc] = p_region;
+	if (!_region_locations.has(loc)) {
+		_region_locations.push_back(loc);
+	}
+	_region_map[map_index] = slot + 1;
+
+	uint64_t start = Time::get_singleton()->get_ticks_usec();
+	_generated_height_maps.update(maps[TYPE_HEIGHT], slot);
+	_generated_control_maps.update(maps[TYPE_CONTROL], slot);
+	_generated_color_maps.update(maps[TYPE_COLOR], slot);
+	uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
+	_pool_inserts++;
+	_pool_upload_usec_last = usec;
+	_pool_upload_usec_total += usec;
+	_pool_upload_usec_max = MAX(_pool_upload_usec_max, usec);
+	LOG(DEBUG, "Streamed region ", loc, " into slot ", slot, " in ", usec, " us");
+
+	// Per region instancer build only; a rebuild would recreate every instance in the world.
+	if (_terrain->get_instancer() != nullptr) {
+		_terrain->get_instancer()->update_mmis(-1, loc, false);
+	}
+	if (_terrain->get_collision() != nullptr) {
+		_terrain->get_collision()->region_changed(loc);
+	}
+	_pool_signals_pending = true;
+	if (p_update) {
+		_pool_emit_signals();
+	}
+	return OK;
+}
+
+// Frees a region's slot and forgets the region. Streaming is a view of data held elsewhere:
+// eviction never writes the region to disk and does not mark a file for deletion. Save it
+// first (save_region) if it was edited and should persist.
+Error Terrain3DData::evict_region(const Vector2i &p_region_loc, const bool p_update) {
+	ERR_FAIL_COND_V(!_streaming, FAILED);
+	if (!_slot_of.has(p_region_loc)) {
+		LOG(ERROR, "No resident region at ", p_region_loc, " to evict");
+		return FAILED;
+	}
+	int slot = _slot_of[p_region_loc];
+	_slot_of.erase(p_region_loc);
+	_slot_locs[slot] = V2I_MAX;
+	_free_slots.push_back(slot);
+	int map_index = get_region_map_index(p_region_loc);
+	if (map_index >= 0) {
+		_region_map[map_index] = 0; // the stale texture layer is now unreachable
+	}
+	_regions.erase(p_region_loc);
+	int idx = _region_locations.find(p_region_loc);
+	if (idx >= 0) {
+		_region_locations.remove_at(idx);
+	}
+	_pool_evictions++;
+	// The region is gone from _regions, so the per region instancer update would skip it
+	// and leave its instances rendering; destroy its MMIs directly.
+	if (_terrain->get_instancer() != nullptr) {
+		_terrain->get_instancer()->destroy_mmis_by_region(p_region_loc);
+	}
+	if (_terrain->get_collision() != nullptr) {
+		_terrain->get_collision()->region_changed(p_region_loc);
+	}
+	LOG(DEBUG, "Evicted region ", p_region_loc, " from slot ", slot);
+	_pool_signals_pending = true;
+	if (p_update) {
+		_pool_emit_signals();
+	}
+	return OK;
+}
+
+// Consumers follow signals. The material re-sends the region map and slot locations (the
+// texture array RIDs never change after allocation, so the shader is not rebuilt);
+// height_maps_changed refreshes the mesher AABBs; the collision refresh queued by
+// region_changed() runs once.
+void Terrain3DData::_pool_emit_signals() {
+	if (!_pool_signals_pending) {
+		return;
+	}
+	_pool_signals_pending = false;
+	calc_height_range();
+	emit_signal("region_map_changed");
+	emit_signal("maps_changed");
+	emit_signal("height_maps_changed");
+	if (_terrain != nullptr && _terrain->get_collision() != nullptr) {
+		_terrain->get_collision()->flush_region_changes();
+	}
+}
+
+Dictionary Terrain3DData::get_streaming_stats() const {
+	Dictionary stats;
+	stats["streaming"] = _streaming;
+	stats["slot_capacity"] = _slot_capacity;
+	stats["slots_used"] = _slot_capacity - _free_slots.size();
+	stats["inserts"] = int64_t(_pool_inserts);
+	stats["evictions"] = int64_t(_pool_evictions);
+	stats["upload_usec_last"] = int64_t(_pool_upload_usec_last);
+	stats["upload_usec_max"] = int64_t(_pool_upload_usec_max);
+	stats["upload_usec_mean"] = _pool_inserts > 0 ? double(_pool_upload_usec_total) / double(_pool_inserts) : 0.0;
+	stats["bytes_per_slot"] = _pool_bytes_per_slot; // CPU image bytes; GPU use is about the same
+	stats["bytes_allocated"] = _pool_bytes_per_slot * _slot_capacity;
+	return stats;
+}
+
 void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regions, const bool p_generate_mipmaps) {
 	// Generate region color mipmaps if requested
 	if (p_generate_mipmaps && (p_map_type == TYPE_COLOR || p_map_type == TYPE_MAX)) {
@@ -530,8 +801,17 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 		}
 	}
 
+	// Barge Game addition: while streaming, membership and texture layers are managed per
+	// slot by add_region_streamed and evict_region. A full rebuild here would re-enumerate
+	// ids and collapse the pool, so only the per region update of edited regions below
+	// applies (get_region_id returns the slot, so it hits the right layer). Signals held
+	// back by inserts or evictions with p_update = false are sent here.
+	if (_streaming) {
+		_region_map_dirty = false;
+		_pool_emit_signals();
+	}
 	// Mark texture arrays dirty for rebuilding
-	if (p_all_regions) {
+	if (!_streaming && p_all_regions) {
 		LOG(EXTREME, "Marking dirty maps of type: ", p_map_type);
 		switch (p_map_type) {
 			case TYPE_HEIGHT:
@@ -1435,6 +1715,15 @@ void Terrain3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("save_region", "region_location", "directory", "save_16_bit", "color_compress_mode"), &Terrain3DData::save_region, DEFVAL(""), DEFVAL(false), DEFVAL(COMPRESS_NONE));
 	ClassDB::bind_method(D_METHOD("load_directory", "directory"), &Terrain3DData::load_directory);
 	ClassDB::bind_method(D_METHOD("load_region", "region_location", "directory", "update"), &Terrain3DData::load_region, DEFVAL(true));
+	// Barge Game addition: slot pool streaming
+	ClassDB::bind_method(D_METHOD("enable_streaming", "slot_capacity"), &Terrain3DData::enable_streaming);
+	ClassDB::bind_method(D_METHOD("is_streaming"), &Terrain3DData::is_streaming);
+	ClassDB::bind_method(D_METHOD("get_slot_capacity"), &Terrain3DData::get_slot_capacity);
+	ClassDB::bind_method(D_METHOD("get_free_slot_count"), &Terrain3DData::get_free_slot_count);
+	ClassDB::bind_method(D_METHOD("add_region_streamed", "region", "update"), &Terrain3DData::add_region_streamed, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("evict_region", "region_location", "update"), &Terrain3DData::evict_region, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("get_shader_region_locations"), &Terrain3DData::get_shader_region_locations);
+	ClassDB::bind_method(D_METHOD("get_streaming_stats"), &Terrain3DData::get_streaming_stats);
 
 	ClassDB::bind_method(D_METHOD("get_height_maps"), &Terrain3DData::get_height_maps);
 	ClassDB::bind_method(D_METHOD("get_control_maps"), &Terrain3DData::get_control_maps);

@@ -137,6 +137,7 @@ private:
 
 	void _build_containers();
 	void _destroy_containers();
+	void _on_region_map_changed(); // Barge Game addition
 	void _destroy_labels();
 
 	void _setup_mouse_picking();

@@ -67,3 +67,48 @@ Each change gets a section:
   to int32 limits, uniqueness, malformed names rejected, a stock-named folder loads with the
   right heights). The disk round trip at locations beyond ±16 is in the region-window test.
 - **Upstream:** none yet; candidate for a PR together with the window change.
+
+### 3. Fixed slot pool for region textures ("streaming")
+
+- **What:** `Terrain3DData.enable_streaming(slot_capacity)` switches an empty data object to a
+  fixed-capacity slot pool. A region then holds a stable slot (its texture array layer);
+  adding or evicting one uploads one layer per map type and changes one region map entry.
+  No texture array rebuild, no shader rebuild and no collision body rebuild. While
+  streaming, `add_region` / `remove_region` route to `add_region_streamed` /
+  `evict_region`, so callers keep the classic API (`p_update = false` batches the signals
+  until `update_maps()`). Eviction forgets the region; it never writes or deletes files.
+  `get_streaming_stats()` reports slots in use, inserts, evictions, upload time and memory.
+  Without `enable_streaming` nothing changes (golden test).
+- **Why:** stock rebuilds every texture array, re-enumerates region ids and rebuilds the
+  whole collision body on every add or remove. Streaming regions around the barge needs
+  add/evict to cost one region, not the whole world.
+- **Origin:** the data layer of upstream draft PR #1004 (TokisanGames/Terrain3D), without its
+  disk streamer and editor parts. Our differences:
+  - The arrays are allocated at the first insert as copies of that region's maps, so their
+    formats match whatever the region carries (#1004 hard-codes uncompressed RGBA8 colour,
+    which breaks compressed colour maps). Later regions are checked against that format.
+  - The material uploads the per-slot location table (`get_shader_region_locations`);
+    #1004 kept uploading the dense list, which does not match slot-indexed layers.
+  - Uses `get_active_color_map()` and applies the runtime colour compression rules of
+    `add_region`.
+  - Collision: `Terrain3D` no longer connects `region_map_changed` straight to collision
+    `build()`; `_on_region_map_changed` skips it while streaming. Inserts and evictions
+    call `Terrain3DCollision::region_changed`, and dynamic collision refreshes its shapes in
+    place once per batch when the region can touch the area around the target (full
+    collision is rebuilt).
+  - Evicting a region also drops instancer updates queued for it (otherwise "Errant null
+    region" warnings).
+  - Capacity is capped by `Terrain3DMaterial.max_regions` (the shader's layer bound).
+  - The editor is refused (`enable_streaming` is runtime only); `set_region_locations`,
+    `change_region_size` and `load_directory` refuse while streaming.
+  - #1004's material `FULL_REBUILD` fix is not needed: v1.1.0-stable already tests all bits.
+- **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d.{h,cpp}`,
+  `src/terrain_3d_collision.{h,cpp}`, `src/terrain_3d_instancer.{h,cpp}`,
+  `src/terrain_3d_material.cpp`.
+- **Test:** `project/tests/test_slot_pool.gd`: batched and single inserts, replacement keeps
+  the slot, 500 random add/evict operations with invariants every 50 (free slots, unique
+  slots, shader table, has_region, heights), texture array RIDs unchanged, non-resident
+  answers, collision refreshed in place under the target with the body RID unchanged,
+  exhaustion, refused operations. Run it with `--windowed` too: headless uses a dummy
+  renderer and does not upload textures.
+- **Upstream:** draft PR #1004 covers the idea; our fixes above could go back to it.

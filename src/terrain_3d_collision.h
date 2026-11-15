@@ -45,6 +45,9 @@ private:
 
 	bool _initialized = false;
 	Vector2i _last_snapped_pos = V2I_MAX;
+	// Barge Game addition: region streaming refreshes collision in place, not by build()
+	bool _region_refresh_pending = false;
+	bool _region_rebuild_pending = false;
 
 	Vector2i _snap_to_grid(const Vector2i &p_pos) const;
 	Vector2i _snap_to_grid(const Vector3 &p_pos) const;
@@ -66,6 +69,9 @@ public:
 	void reset_target_position() { _last_snapped_pos = V2I_MAX; }
 	void update(const Vector2i &p_region_loc = V2I_MAX, const bool p_rebuild = false);
 	void destroy();
+	// Barge Game addition: a streamed region was inserted or evicted
+	void region_changed(const Vector2i &p_region_loc);
+	void flush_region_changes();
 
 	void set_mode(const CollisionMode p_mode);
 	CollisionMode get_mode() const { return _mode; }

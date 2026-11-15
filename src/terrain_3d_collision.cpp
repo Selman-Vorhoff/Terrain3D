@@ -374,6 +374,44 @@ void Terrain3DCollision::update(const Vector2i &p_region_loc, const bool p_rebui
 	LOG(EXTREME, "Collision update time: ", Time::get_singleton()->get_ticks_usec() - time, " us");
 }
 
+// Barge Game addition. A streamed region was inserted or evicted. Dynamic collision only
+// cares when the region can intersect the area around the collision target; the shapes
+// there are refilled by flush_region_changes(). Full collision is rebuilt, which is costly
+// and only meant for small streamed worlds. Ported from the collision refresh in upstream
+// draft PR #1004's streamer.
+void Terrain3DCollision::region_changed(const Vector2i &p_region_loc) {
+	if (!_initialized || !is_enabled() || _terrain == nullptr) {
+		return;
+	}
+	if (!is_dynamic_mode()) {
+		_region_rebuild_pending = true;
+		return;
+	}
+	// Work in descaled (vertex) units, as update() does.
+	real_t spacing = _terrain->get_vertex_spacing();
+	Vector3 target = _terrain->get_collision_target_position() / spacing;
+	real_t region_size = real_t(_terrain->get_region_size());
+	Vector2 lo = Vector2(p_region_loc) * region_size;
+	Vector2 hi = lo + Vector2(region_size, region_size);
+	Vector2 t = Vector2(target.x, target.z);
+	Vector2 nearest = Vector2(CLAMP(t.x, lo.x, hi.x), CLAMP(t.y, lo.y, hi.y));
+	real_t reach = real_t(_radius) + real_t(_shape_size);
+	if (nearest.distance_squared_to(t) <= reach * reach) {
+		_region_refresh_pending = true;
+	}
+}
+
+void Terrain3DCollision::flush_region_changes() {
+	if (_region_rebuild_pending) {
+		_region_rebuild_pending = false;
+		_region_refresh_pending = false;
+		build();
+	} else if (_region_refresh_pending) {
+		_region_refresh_pending = false;
+		update(V2I_MAX, true);
+	}
+}
+
 void Terrain3DCollision::destroy() {
 	_initialized = false;
 	_last_snapped_pos = V2I_MAX;
