@@ -6,9 +6,12 @@
 #include <godot_cpp/classes/collision_shape3d.hpp>
 #include <godot_cpp/classes/physics_material.hpp>
 #include <godot_cpp/classes/static_body3d.hpp>
+#include <godot_cpp/templates/hash_map.hpp>
+#include <godot_cpp/templates/hash_set.hpp>
 #include <vector>
 
 #include "constants.h"
+#include "target_node_3d.h"
 #include "terrain_3d_util.h"
 
 class Terrain3D;
@@ -49,6 +52,31 @@ private:
 	bool _region_refresh_pending = false;
 	bool _region_rebuild_pending = false;
 
+	// Barge Game addition: several collision targets (dynamic modes). With an empty list,
+	// dynamic collision follows the single stock target exactly as upstream does.
+	struct Target {
+		TargetNode3D node;
+		real_t radius_m = 0.f;
+		Vector2i snapped = V2I_MAX; // last snapped position in vertex units
+	};
+	std::vector<Target> _targets;
+	HashMap<Vector2i, int> _cell_shapes; // active shape per cell (top left, vertex units)
+	std::vector<int> _free_shapes; // disabled shapes ready for reuse
+	HashSet<Vector2i> _dirty_regions; // regions changed since the last flush
+	bool _targets_dirty = false;
+	uint64_t _stat_updates = 0;
+	uint64_t _stat_fills = 0;
+	uint64_t _stat_update_usec_last = 0;
+	uint64_t _stat_update_usec_max = 0;
+	uint64_t _stat_update_usec_total = 0;
+
+	bool _uses_targets() const { return !_targets.empty(); }
+	int _shape_create();
+	int _shape_count() const;
+	bool _fill_cell(const int p_shape_id, const Vector2i &p_cell);
+	void _update_targets(const bool p_refill_all, const bool p_dirty_only);
+	bool _cell_touches_dirty(const Vector2i &p_cell) const;
+
 	Vector2i _snap_to_grid(const Vector2i &p_pos) const;
 	Vector2i _snap_to_grid(const Vector3 &p_pos) const;
 	Dictionary _get_shape_data(const Vector2i &p_position, const int p_size);
@@ -66,12 +94,22 @@ public:
 	void initialize(Terrain3D *p_terrain);
 
 	void build();
-	void reset_target_position() { _last_snapped_pos = V2I_MAX; }
+	void reset_target_position() {
+		_last_snapped_pos = V2I_MAX;
+		_targets_dirty = true; // Barge Game: several targets re-snap too
+	}
 	void update(const Vector2i &p_region_loc = V2I_MAX, const bool p_rebuild = false);
 	void destroy();
 	// Barge Game addition: a streamed region was inserted or evicted
 	void region_changed(const Vector2i &p_region_loc);
 	void flush_region_changes();
+	// Barge Game addition: several collision targets, radius in metres.
+	void add_target(Node3D *p_node, const real_t p_radius_m);
+	void remove_target(Node3D *p_node);
+	void clear_targets();
+	TypedArray<Node3D> get_targets() const;
+	real_t get_target_radius(Node3D *p_node) const;
+	Dictionary get_stats() const;
 
 	void set_mode(const CollisionMode p_mode);
 	CollisionMode get_mode() const { return _mode; }

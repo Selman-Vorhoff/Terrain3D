@@ -725,6 +725,20 @@ void Terrain3D::set_collision_target(Node3D *p_node) {
 	}
 }
 
+// Barge Game addition. Registers a node that dynamic collision keeps ground around,
+// p_radius_m metres in every direction. With any registered, the single collision target
+// (and the camera fallback) is ignored; removing the last returns to it.
+void Terrain3D::add_collision_target(Node3D *p_node, const real_t p_radius_m) {
+	if (_collision == nullptr) {
+		LOG(ERROR, "Collision is not set up yet; add collision targets once Terrain3D is in the tree");
+		return;
+	}
+	_collision->add_target(p_node, p_radius_m);
+	if (p_node != nullptr) {
+		set_physics_process(true);
+	}
+}
+
 Vector3 Terrain3D::get_collision_target_position() const {
 	// In Editor, always prefer camera
 	if (IS_EDITOR) {
@@ -1443,6 +1457,10 @@ void Terrain3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_collision_target", "node"), &Terrain3D::set_collision_target);
 	ClassDB::bind_method(D_METHOD("get_collision_target"), &Terrain3D::get_collision_target);
 	ClassDB::bind_method(D_METHOD("get_collision_target_position"), &Terrain3D::get_collision_target_position);
+	ClassDB::bind_method(D_METHOD("add_collision_target", "node", "radius_m"), &Terrain3D::add_collision_target);
+	ClassDB::bind_method(D_METHOD("remove_collision_target", "node"), &Terrain3D::remove_collision_target);
+	ClassDB::bind_method(D_METHOD("clear_collision_targets"), &Terrain3D::clear_collision_targets);
+	ClassDB::bind_method(D_METHOD("get_collision_targets"), &Terrain3D::get_collision_targets);
 	ClassDB::bind_method(D_METHOD("set_light_target", "node"), &Terrain3D::set_light_target);
 	ClassDB::bind_method(D_METHOD("get_light_target"), &Terrain3D::get_light_target);
 	ClassDB::bind_method(D_METHOD("snap"), &Terrain3D::snap);

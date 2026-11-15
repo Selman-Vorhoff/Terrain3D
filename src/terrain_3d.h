@@ -199,6 +199,11 @@ public:
 	void set_collision_target(Node3D *p_node);
 	Node3D *get_collision_target() const { return _collision_target.ptr(); }
 	Vector3 get_collision_target_position() const;
+	// Barge Game addition: several collision targets, radius in metres
+	void add_collision_target(Node3D *p_node, const real_t p_radius_m);
+	void remove_collision_target(Node3D *p_node) { _collision ? _collision->remove_target(p_node) : void(); }
+	void clear_collision_targets() { _collision ? _collision->clear_targets() : void(); }
+	TypedArray<Node3D> get_collision_targets() const { return _collision ? _collision->get_targets() : TypedArray<Node3D>(); }
 	void set_light_target(Node3D *p_node);
 	Node3D *get_light_target() const { return _light_target.ptr(); }
 	void snap();

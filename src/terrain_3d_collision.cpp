@@ -129,6 +129,202 @@ void Terrain3DCollision::_reload_physics_material() {
 	}
 }
 
+// Barge Game addition. Several collision targets.
+//
+// With targets registered, dynamic collision fills the union of the circles around them
+// (radius in metres, per target) with shapes of _shape_size vertices on the stock shape
+// grid. Shapes are created on demand, so the pool grows to the combined area without
+// counting overlaps twice; shapes no longer needed are disabled and reused. Each target is
+// snapped to the shape grid as stock snaps its one target, so the shape set changes only
+// when a target crosses a grid line. With no targets, update() runs the stock code.
+
+int Terrain3DCollision::_shape_count() const {
+	if (is_editor_mode()) {
+		return int(_shapes.size());
+	}
+	return _static_body_rid.is_valid() ? PS->body_get_shape_count(_static_body_rid) : 0;
+}
+
+// Adds one disabled shape to the body, as build() does, and returns its id.
+int Terrain3DCollision::_shape_create() {
+	int hshape_size = _shape_size + 1;
+	Transform3D xform(Basis(), V3_MAX);
+	if (is_editor_mode()) {
+		CollisionShape3D *col_shape = memnew(CollisionShape3D);
+		_shapes.push_back(col_shape);
+		col_shape->set_name("CollisionShape3D");
+		col_shape->set_disabled(true);
+		col_shape->set_visible(true);
+		col_shape->set_enable_debug_fill(false);
+		Ref<HeightMapShape3D> hshape;
+		hshape.instantiate();
+		hshape->set_map_width(hshape_size);
+		hshape->set_map_depth(hshape_size);
+		col_shape->set_shape(hshape);
+		_static_body->add_child(col_shape, true);
+		col_shape->set_owner(_static_body);
+		col_shape->set_transform(xform);
+		return int(_shapes.size()) - 1;
+	}
+	RID shape_rid = PS->heightmap_shape_create();
+	PS->body_add_shape(_static_body_rid, shape_rid, xform, true);
+	return PS->body_get_shape_count(_static_body_rid) - 1;
+}
+
+// Fills a shape with the cell whose top left vertex is p_cell. False if the cell's region
+// is not resident (the shape is left untouched).
+bool Terrain3DCollision::_fill_cell(const int p_shape_id, const Vector2i &p_cell) {
+	Dictionary shape_data = _get_shape_data(p_cell, _shape_size);
+	if (shape_data.is_empty()) {
+		return false;
+	}
+	real_t spacing = _terrain->get_vertex_spacing();
+	Transform3D xform = shape_data["xform"];
+	xform.scale(Vector3(spacing, 1.f, spacing));
+	_shape_set_transform(p_shape_id, xform);
+	_shape_set_disabled(p_shape_id, false);
+	_shape_set_data(p_shape_id, shape_data);
+	_stat_fills++;
+	return true;
+}
+
+// True if the cell's samples (its vertices plus the far border row and column) read a
+// region changed since the last flush.
+bool Terrain3DCollision::_cell_touches_dirty(const Vector2i &p_cell) const {
+	if (_dirty_regions.is_empty()) {
+		return false;
+	}
+	int region_size = _terrain->get_region_size();
+	Vector2i lo = V2I_DIVIDE_FLOOR(p_cell, region_size);
+	const Vector2i far_corner = p_cell + Vector2i(int(_shape_size), int(_shape_size));
+	Vector2i hi = V2I_DIVIDE_FLOOR(far_corner, region_size);
+	for (int y = lo.y; y <= hi.y; y++) {
+		for (int x = lo.x; x <= hi.x; x++) {
+			if (_dirty_regions.has(Vector2i(x, y))) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// p_refill_all: refill every needed shape (update(…, true)).
+// p_dirty_only: a region flush; refill the shapes that read a changed region.
+void Terrain3DCollision::_update_targets(const bool p_refill_all, const bool p_dirty_only) {
+	uint64_t start = Time::get_singleton()->get_ticks_usec();
+	real_t spacing = _terrain->get_vertex_spacing();
+
+	// 1. Snap each target; drop freed ones.
+	bool changed = p_refill_all || p_dirty_only || _targets_dirty;
+	_targets_dirty = false;
+	for (int i = int(_targets.size()) - 1; i >= 0; i--) {
+		Target &t = _targets[i];
+		Node3D *node = t.node.get_target();
+		if (node == nullptr) {
+			LOG(INFO, "Collision target freed, removing it");
+			_targets.erase(_targets.begin() + i);
+			changed = true;
+			continue;
+		}
+		Vector2i snapped = node->is_inside_tree() ? _snap_to_grid(node->get_global_position() / spacing) : V2I_MAX;
+		if (snapped != t.snapped) {
+			t.snapped = snapped;
+			changed = true;
+		}
+	}
+	if (_targets.empty()) {
+		LOG(INFO, "Last collision target gone, back to the single stock target");
+		build();
+		return;
+	}
+	if (!changed) {
+		return;
+	}
+
+	// 2. The cells needed: every cell whose centre lies within a target's radius of the
+	// target's snapped position, as stock tests its one target. At least the four cells
+	// around the target are kept, however small the radius.
+	std::vector<Vector2i> needed;
+	HashSet<Vector2i> needed_set;
+	const real_t half = real_t(_shape_size) * 0.5f;
+	for (const Target &t : _targets) {
+		if (t.snapped == V2I_MAX) {
+			continue; // outside the tree: no collision for it until it returns
+		}
+		real_t radius = MAX(t.radius_m / spacing, real_t(_shape_size) * 0.75f);
+		real_t radius_sqr = radius * radius;
+		int reach = int(Math::ceil(radius / real_t(_shape_size))) + 1;
+		for (int z = -reach; z < reach; z++) {
+			for (int x = -reach; x < reach; x++) {
+				Vector2 centre_offset(real_t(x * _shape_size) + half, real_t(z * _shape_size) + half);
+				if (centre_offset.length_squared() > radius_sqr) {
+					continue;
+				}
+				Vector2i cell = t.snapped + Vector2i(x, z) * int(_shape_size);
+				if (!needed_set.has(cell)) {
+					needed_set.insert(cell);
+					needed.push_back(cell);
+				}
+			}
+		}
+	}
+
+	// 3. Release shapes no longer needed.
+	std::vector<Vector2i> released;
+	for (const KeyValue<Vector2i, int> &kv : _cell_shapes) {
+		if (!needed_set.has(kv.key)) {
+			released.push_back(kv.key);
+		}
+	}
+	for (const Vector2i &cell : released) {
+		int id = _cell_shapes[cell];
+		_shape_set_disabled(id, true);
+		_free_shapes.push_back(id);
+		_cell_shapes.erase(cell);
+	}
+
+	// 4. Fill needed cells: refresh active ones that changed, place missing ones. A cell
+	// whose region is not resident stays empty and is tried again on the next change.
+	for (const Vector2i &cell : needed) {
+		int *active = _cell_shapes.getptr(cell);
+		if (active != nullptr) {
+			if (p_refill_all || (p_dirty_only && _cell_touches_dirty(cell))) {
+				if (!_fill_cell(*active, cell)) {
+					_shape_set_disabled(*active, true);
+					_free_shapes.push_back(*active);
+					_cell_shapes.erase(cell);
+				}
+			}
+			continue;
+		}
+		int id;
+		if (!_free_shapes.empty()) {
+			id = _free_shapes.back();
+			if (!_fill_cell(id, cell)) {
+				continue;
+			}
+			_free_shapes.pop_back();
+		} else {
+			if (!_terrain->get_data()->has_region(V2I_DIVIDE_FLOOR(cell, _terrain->get_region_size()))) {
+				continue;
+			}
+			id = _shape_create();
+			if (!_fill_cell(id, cell)) {
+				_free_shapes.push_back(id);
+				continue;
+			}
+		}
+		_cell_shapes.insert(cell, id);
+	}
+
+	uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
+	_stat_updates++;
+	_stat_update_usec_last = usec;
+	_stat_update_usec_total += usec;
+	_stat_update_usec_max = MAX(_stat_update_usec_max, usec);
+	LOG(EXTREME, "Collision targets: ", _targets.size(), ", shapes active: ", _cell_shapes.size(), "/", _shape_count(), ", ", usec, " us");
+}
+
 ///////////////////////////
 // Public Functions
 ///////////////////////////
@@ -186,7 +382,10 @@ void Terrain3DCollision::build() {
 	// Create CollisionShape3Ds
 	int shape_count;
 	int hshape_size;
-	if (is_dynamic_mode()) {
+	if (is_dynamic_mode() && _uses_targets()) {
+		shape_count = 0; // Barge Game: created on demand by _update_targets()
+		hshape_size = _shape_size + 1;
+	} else if (is_dynamic_mode()) {
 		int grid_width = _radius * 2 / _shape_size;
 		grid_width = int_ceil_pow2(grid_width, 4);
 		shape_count = grid_width * grid_width;
@@ -237,6 +436,10 @@ void Terrain3DCollision::update(const Vector2i &p_region_loc, const bool p_rebui
 	}
 	if (p_rebuild && !is_dynamic_mode()) {
 		build();
+		return;
+	}
+	if (is_dynamic_mode() && _uses_targets()) {
+		_update_targets(p_rebuild, false); // Barge Game: several targets
 		return;
 	}
 	int time = Time::get_singleton()->get_ticks_usec();
@@ -387,6 +590,13 @@ void Terrain3DCollision::region_changed(const Vector2i &p_region_loc) {
 		_region_rebuild_pending = true;
 		return;
 	}
+	if (_uses_targets()) {
+		// Several targets: remember the region; the flush refills only shapes that read it
+		// and retries needed cells that had no region, so a far region costs lookups only.
+		_dirty_regions.insert(p_region_loc);
+		_region_refresh_pending = true;
+		return;
+	}
 	// Work in descaled (vertex) units, as update() does.
 	real_t spacing = _terrain->get_vertex_spacing();
 	Vector3 target = _terrain->get_collision_target_position() / spacing;
@@ -413,13 +623,112 @@ void Terrain3DCollision::flush_region_changes() {
 		build();
 	} else if (_region_refresh_pending) {
 		_region_refresh_pending = false;
-		update(V2I_MAX, true);
+		if (_initialized && is_dynamic_mode() && _uses_targets()) {
+			_update_targets(false, true);
+		} else {
+			update(V2I_MAX, true);
+		}
 	}
+	_dirty_regions.clear();
+}
+
+void Terrain3DCollision::add_target(Node3D *p_node, const real_t p_radius_m) {
+	if (p_node == nullptr) {
+		LOG(ERROR, "Collision target is null");
+		return;
+	}
+	if (!(p_radius_m > 0.f)) {
+		LOG(ERROR, "Collision target radius must be above 0 m, got ", p_radius_m);
+		return;
+	}
+	for (Target &t : _targets) {
+		if (t.node.get_target() == p_node) {
+			t.radius_m = p_radius_m;
+			_targets_dirty = true;
+			LOG(INFO, "Collision target ", p_node, " radius now ", p_radius_m, " m");
+			return;
+		}
+	}
+	const bool first = !_uses_targets();
+	Target t;
+	t.node.set_target(p_node);
+	t.radius_m = p_radius_m;
+	_targets.push_back(t);
+	_targets_dirty = true;
+	LOG(INFO, "Collision target added: ", p_node, ", radius ", p_radius_m, " m, targets: ", _targets.size());
+	if (first && _initialized && is_dynamic_mode()) {
+		build(); // leave the stock grid for on-demand shapes
+	}
+}
+
+void Terrain3DCollision::remove_target(Node3D *p_node) {
+	for (int i = 0; i < int(_targets.size()); i++) {
+		if (_targets[i].node.get_target() == p_node) {
+			_targets.erase(_targets.begin() + i);
+			_targets_dirty = true;
+			LOG(INFO, "Collision target removed: ", p_node, ", targets: ", _targets.size());
+			if (_targets.empty() && _initialized && is_dynamic_mode()) {
+				build(); // back to the single stock target
+			}
+			return;
+		}
+	}
+}
+
+void Terrain3DCollision::clear_targets() {
+	if (_targets.empty()) {
+		return;
+	}
+	_targets.clear();
+	LOG(INFO, "Collision targets cleared");
+	if (_initialized && is_dynamic_mode()) {
+		build();
+	}
+}
+
+TypedArray<Node3D> Terrain3DCollision::get_targets() const {
+	TypedArray<Node3D> nodes;
+	for (const Target &t : _targets) {
+		if (Node3D *node = t.node.get_target()) {
+			nodes.push_back(node);
+		}
+	}
+	return nodes;
+}
+
+real_t Terrain3DCollision::get_target_radius(Node3D *p_node) const {
+	for (const Target &t : _targets) {
+		if (t.node.get_target() == p_node) {
+			return t.radius_m;
+		}
+	}
+	return 0.f;
+}
+
+Dictionary Terrain3DCollision::get_stats() const {
+	Dictionary stats;
+	stats["targets"] = int64_t(_targets.size());
+	stats["shapes_total"] = int64_t(_shape_count());
+	stats["shapes_active"] = int64_t(_cell_shapes.size());
+	stats["shapes_free"] = int64_t(_free_shapes.size());
+	stats["updates"] = int64_t(_stat_updates);
+	stats["fills"] = int64_t(_stat_fills);
+	stats["update_usec_last"] = int64_t(_stat_update_usec_last);
+	stats["update_usec_max"] = int64_t(_stat_update_usec_max);
+	stats["update_usec_mean"] = _stat_updates > 0 ? double(_stat_update_usec_total) / double(_stat_updates) : 0.0;
+	return stats;
 }
 
 void Terrain3DCollision::destroy() {
 	_initialized = false;
 	_last_snapped_pos = V2I_MAX;
+	// Barge Game: the shapes go; the targets stay and are snapped afresh after build()
+	_cell_shapes.clear();
+	_free_shapes.clear();
+	for (Target &t : _targets) {
+		t.snapped = V2I_MAX;
+	}
+	_targets_dirty = true;
 
 	// Physics Server
 	if (_static_body_rid.is_valid()) {
@@ -593,6 +902,13 @@ void Terrain3DCollision::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_physics_material", "material"), &Terrain3DCollision::set_physics_material);
 	ClassDB::bind_method(D_METHOD("get_physics_material"), &Terrain3DCollision::get_physics_material);
 	ClassDB::bind_method(D_METHOD("get_rid"), &Terrain3DCollision::get_rid);
+	// Barge Game addition: several collision targets
+	ClassDB::bind_method(D_METHOD("add_target", "node", "radius_m"), &Terrain3DCollision::add_target);
+	ClassDB::bind_method(D_METHOD("remove_target", "node"), &Terrain3DCollision::remove_target);
+	ClassDB::bind_method(D_METHOD("clear_targets"), &Terrain3DCollision::clear_targets);
+	ClassDB::bind_method(D_METHOD("get_targets"), &Terrain3DCollision::get_targets);
+	ClassDB::bind_method(D_METHOD("get_target_radius", "node"), &Terrain3DCollision::get_target_radius);
+	ClassDB::bind_method(D_METHOD("get_stats"), &Terrain3DCollision::get_stats);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "mode", PROPERTY_HINT_ENUM, "Disabled,Dynamic / Game,Dynamic / Editor,Full / Game,Full / Editor"), "set_mode", "get_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "shape_size", PROPERTY_HINT_RANGE, "8,64,8"), "set_shape_size", "get_shape_size");

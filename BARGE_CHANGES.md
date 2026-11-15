@@ -253,3 +253,53 @@ Each change gets a section:
   the height range; instancer meshes exist only while drawn, through a global rebuild and
   eviction (counts when windowed); upload accounting.
 - **Upstream:** none; belongs with the window change (entry 4).
+
+### 6. Several dynamic collision targets
+
+- **What:** dynamic collision can keep ground around several nodes at once.
+  `Terrain3D.add_collision_target(node, radius_m)` registers a node (or changes its
+  radius), `remove_collision_target(node)` and `clear_collision_targets()` drop them,
+  `get_collision_targets()` lists them; the same calls exist on `Terrain3DCollision`
+  (`add_target`, `remove_target`, `clear_targets`, `get_targets`, `get_target_radius`)
+  plus `get_stats()`.
+  - The radius is in **metres**, per target. Stock `collision_radius` is in vertices, so
+    at 0.25 m spacing its 64 vertices are only 16 m. At least the four shapes around a
+    target are kept, however small the radius.
+  - Shapes stay on the stock shape grid (`collision_shape_size` vertices) and each target
+    is snapped to it as stock snaps its one target, so the shapes change only when a
+    target crosses a grid line. A cell is kept when its centre lies within a target's
+    radius of that target's snapped position, the stock test.
+  - The pool fills the union of the targets' circles. Shapes are created on demand, so
+    overlapping targets share shapes and the pool is never sized by hand. Shapes no longer
+    needed are disabled and reused; they are freed when the body is rebuilt.
+  - A freed target is dropped on the next update. A target outside the tree keeps its
+    entry but gets no shapes until it returns.
+  - With no targets registered, collision behaves exactly as stock (one target:
+    `collision_target`, else the clipmap target, else the camera; `collision_radius` in
+    vertices). The first target added and the last removed rebuild the body, switching
+    between the two.
+  - While streaming, a changed region (insert, replacement, eviction, edit sync) is
+    remembered; the flush refills only the shapes whose samples read it (their border row
+    and column included) and retries needed cells that had no region. A stationary target
+    therefore gains ground when its region streams in and loses it when it is evicted.
+  - Full collision modes ignore the targets.
+- **Stats:** `Terrain3DCollision.get_stats()`: `targets`, `shapes_total`, `shapes_active`,
+  `shapes_free`, `updates`, `fills`, `update_usec_last/max/mean` (target updates only).
+- **Why:** in co-op each peer needs ground under its own player and under the barge, and
+  the host under the barge wherever the host player walks
+  (`Management/Planning/terrain_streaming_multiplayer.md` in the game repository).
+  Stock follows one node, so a host player walking more than the radius from the barge
+  leaves the host-simulated barge with no ground.
+- **Limits:** Terrain3D stops physics processing when it finds no camera and no clipmap
+  target (stock), and collision then stops following targets. Shape fill cost is the stock
+  per-shape cost; `test_collision_targets_perf.gd` logs it.
+- **Files:** `src/terrain_3d_collision.{h,cpp}`, `src/terrain_3d.{h,cpp}`.
+- **Test:** `project/tests/test_collision_targets.gd`: separate targets (shape count from
+  the rule), overlapping targets (union, no double count), radius in metres at 0.25 m
+  spacing, the stock target ignored while targets exist, teleport and shape reuse, a
+  stationary target gaining a streamed region, losing it on eviction and getting the
+  replacement, the border samples refilled when the neighbour arrives, a freed target, the
+  last target removed (stock target again), bad input refused.
+  `project/tests/test_collision_targets_perf.gd` logs fill, step, idle and region flush
+  times for the barge plus six players at 0.25 m with 48 m radius and 8 m shapes.
+- **Upstream:** none; a general feature that could be offered upstream with the window.
