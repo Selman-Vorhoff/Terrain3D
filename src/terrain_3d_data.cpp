@@ -705,21 +705,19 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 	_pool_inserts++;
 
 	if (held != nullptr) {
-		const int slot = *held;
-		uint64_t start = Time::get_singleton()->get_ticks_usec();
-		_pool_upload(slot, loc, maps);
-		uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
-		_pool_upload_usec_last = usec;
-		_pool_upload_usec_total += usec;
-		_pool_upload_usec_max = MAX(_pool_upload_usec_max, usec);
+		_pool_upload(*held, loc, maps);
 		if (_terrain->get_instancer() != nullptr) {
 			_terrain->get_instancer()->update_mmis(-1, loc, false);
 		}
-	} else if (is_in_region_window(loc)) {
-		_pool_attach(loc);
 	} else {
+		// A freshly added region is in sync as given: collision is told below, and its maps
+		// carry their own height range.
 		_pool_remember(loc, maps);
-		LOG(DEBUG, "Region ", loc, " resident outside the window (data only)");
+		if (is_in_region_window(loc)) {
+			_pool_attach(loc);
+		} else {
+			LOG(DEBUG, "Region ", loc, " resident outside the window (data only)");
+		}
 	}
 	if (_terrain->get_collision() != nullptr) {
 		_terrain->get_collision()->region_changed(loc);
@@ -742,6 +740,11 @@ Error Terrain3DData::evict_region(const Vector2i &p_region_loc, const bool p_upd
 	}
 	const bool had_slot = _slot_of.has(p_region_loc);
 	_pool_detach(p_region_loc);
+	// Whatever meshes the region has go too, slot or not (a global instancer rebuild must
+	// not leave any behind).
+	if (_terrain->get_instancer() != nullptr) {
+		_terrain->get_instancer()->destroy_mmis_by_region(p_region_loc);
+	}
 	_regions.erase(p_region_loc);
 	_pool_dirty.erase(p_region_loc);
 	_pool_synced.erase(p_region_loc);
@@ -792,14 +795,14 @@ bool Terrain3DData::_pool_attach(const Vector2i &p_loc) {
 	if (map_index >= 0) {
 		_region_map[map_index] = slot + 1;
 	}
-	uint64_t start = Time::get_singleton()->get_ticks_usec();
+	// (1) Changes made while the region was data only (set_height, a new image, the edited
+	// flag) reach collision and the height range here; the upload below makes the GPU
+	// current, and _pool_upload then records the images as synced.
+	if (_pool_changed(p_loc, region, maps)) {
+		_pool_sync_data(p_loc, region);
+	}
 	_pool_upload(slot, p_loc, maps);
-	uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
-	_pool_upload_usec_last = usec;
-	_pool_upload_usec_total += usec;
-	_pool_upload_usec_max = MAX(_pool_upload_usec_max, usec);
-	_pool_uploads++;
-	LOG(DEBUG, "Region ", p_loc, " drawn from slot ", slot, ", uploaded in ", usec, " us");
+	LOG(DEBUG, "Region ", p_loc, " drawn from slot ", slot, ", uploaded in ", _pool_upload_usec_last, " us");
 	// Per region instancer build only; a rebuild would recreate every instance in the world.
 	if (_terrain->get_instancer() != nullptr) {
 		_terrain->get_instancer()->update_mmis(-1, p_loc, false);
@@ -929,11 +932,47 @@ Error Terrain3DData::_pool_check_maps(const Vector2i &p_loc, const Ref<Image> p_
 	return OK;
 }
 
+// Uploads a region's three maps into its slot. Every upload (insert inside the window,
+// replacement, the window reaching a region, an edit) is timed and counted here, so the
+// stats' mean is per upload.
 void Terrain3DData::_pool_upload(const int p_slot, const Vector2i &p_loc, const Ref<Image> p_maps[3]) {
+	uint64_t start = Time::get_singleton()->get_ticks_usec();
 	_generated_height_maps.update(p_maps[TYPE_HEIGHT], p_slot);
 	_generated_control_maps.update(p_maps[TYPE_CONTROL], p_slot);
 	_generated_color_maps.update(p_maps[TYPE_COLOR], p_slot);
+	uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
+	_pool_uploads++;
+	_pool_upload_usec_last = usec;
+	_pool_upload_usec_total += usec;
+	_pool_upload_usec_max = MAX(_pool_upload_usec_max, usec);
 	_pool_remember(p_loc, p_maps);
+}
+
+// True if a resident region changed since it was last synced: edited flag, written through
+// set_pixel and friends, or given new map images.
+bool Terrain3DData::_pool_changed(const Vector2i &p_loc, const Terrain3DRegion *p_region, const Ref<Image> p_maps[3]) const {
+	if (p_region->is_edited() || _pool_dirty.has(p_loc)) {
+		return true;
+	}
+	const PoolSynced *synced = _pool_synced.getptr(p_loc);
+	for (int t = 0; t < 3; t++) {
+		if (synced == nullptr || p_maps[t].is_null() || uint64_t(p_maps[t]->get_instance_id()) != synced->ids[t]) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// The CPU side of syncing a changed region: its height range (mesher AABBs) and collision.
+// The caller uploads (drawn) or remembers (data only) the images.
+void Terrain3DData::_pool_sync_data(const Vector2i &p_loc, Terrain3DRegion *p_region) {
+	p_region->calc_height_range();
+	p_region->set_edited(false);
+	_pool_dirty.erase(p_loc);
+	if (_terrain->get_collision() != nullptr) {
+		_terrain->get_collision()->region_changed(p_loc);
+	}
+	_pool_signals_pending = true;
 }
 
 // Records which images a resident region had when it was last uploaded or, for a region
@@ -964,28 +1003,19 @@ void Terrain3DData::_pool_update_changed(const bool p_all_mipmaps_regenerated) {
 			continue;
 		}
 		Ref<Image> maps[3] = { region->get_height_map(), region->get_control_map(), region->get_active_color_map() };
-		bool changed = p_all_mipmaps_regenerated || region->is_edited() || _pool_dirty.has(loc);
-		const PoolSynced *synced = _pool_synced.getptr(loc);
-		for (int t = 0; t < 3 && !changed; t++) {
-			changed = synced == nullptr || maps[t].is_null() || uint64_t(maps[t]->get_instance_id()) != synced->ids[t];
-		}
-		if (!changed) {
+		if (!p_all_mipmaps_regenerated && !_pool_changed(loc, region, maps)) {
 			continue;
 		}
 		if (_pool_check_maps(loc, maps) != OK) {
 			continue; // the old layer stays; the error says why
 		}
+		_pool_sync_data(loc, region);
 		const int *slot = _slot_of.getptr(loc);
 		if (slot != nullptr) {
 			_pool_upload(*slot, loc, maps);
 		} else {
 			_pool_remember(loc, maps);
 		}
-		region->set_edited(false);
-		if (_terrain->get_collision() != nullptr) {
-			_terrain->get_collision()->region_changed(loc);
-		}
-		_pool_signals_pending = true;
 		LOG(DEBUG, "Synced changed resident region ", loc, slot ? " (uploaded)" : " (data only)");
 	}
 	_pool_dirty.clear();
@@ -1010,11 +1040,11 @@ Dictionary Terrain3DData::get_streaming_stats() const {
 	stats["regions_resident"] = int(_region_locations.size()); // drawn + data only
 	stats["regions_undrawn"] = int(_pool_undrawn.size()); // inside the window, no free slot
 	stats["inserts"] = int64_t(_pool_inserts);
-	stats["uploads"] = int64_t(_pool_uploads); // slot attachments (insert inside the window, or window reached it)
+	stats["uploads"] = int64_t(_pool_uploads); // every slot upload: insert in the window, replacement, window arrival, edit
 	stats["evictions"] = int64_t(_pool_evictions);
 	stats["upload_usec_last"] = int64_t(_pool_upload_usec_last);
 	stats["upload_usec_max"] = int64_t(_pool_upload_usec_max);
-	stats["upload_usec_mean"] = _pool_inserts > 0 ? double(_pool_upload_usec_total) / double(_pool_inserts) : 0.0;
+	stats["upload_usec_mean"] = _pool_uploads > 0 ? double(_pool_upload_usec_total) / double(_pool_uploads) : 0.0;
 	stats["bytes_per_slot"] = _pool_bytes_per_slot; // CPU image bytes; GPU use is about the same
 	stats["bytes_allocated"] = _pool_bytes_per_slot * _slot_capacity; // whole capacity, from the first insert
 	stats["bytes_resident"] = _pool_bytes_per_slot * (_slot_capacity - _free_slots.size());
@@ -1218,7 +1248,10 @@ void Terrain3DData::set_pixel(const MapType p_map_type, const Vector3 &p_global_
 		map->set_pixelv(vgrid_to_pixelv(vgrid), p_pixel);
 		region->set_modified(true);
 		if (_streaming) {
-			_pool_dirty.insert(region_loc); // uploaded by the next update_maps()
+			_pool_dirty.insert(region_loc); // synced by the next update_maps()
+			if (p_map_type == TYPE_HEIGHT) {
+				region->update_height(p_pixel.r); // grows the range at once; update_maps() recalculates
+			}
 		}
 	}
 }

@@ -98,11 +98,6 @@ void Terrain3DInstancer::_process_updates() {
 		if (!region->get_instances().has(mesh_id)) {
 			continue;
 		}
-		// Barge Game: while streaming, only regions holding a slot (inside the region window)
-		// are drawn; resident regions outside it are data only and get no meshes.
-		if (data->is_streaming() && data->get_region_id(region_loc) < 0) {
-			continue;
-		}
 		_update_mmi_by_region(region, mesh_id);
 	}
 	_queued_updates.clear();
@@ -112,6 +107,13 @@ void Terrain3DInstancer::_process_updates() {
 void Terrain3DInstancer::_update_mmi_by_region(const Terrain3DRegion *p_region, const int p_mesh_id) {
 	if (!p_region) {
 		LOG(ERROR, "p_region is null");
+		return;
+	}
+	// Barge Game: while streaming, only regions holding a slot (inside the region window)
+	// are drawn; resident regions outside it are data only and get no meshes. Checked here
+	// so every path (single updates, global rebuilds) obeys it.
+	const Terrain3DData *stream_data = _terrain->get_data();
+	if (stream_data != nullptr && stream_data->is_streaming() && stream_data->get_region_id(p_region->get_location()) < 0) {
 		return;
 	}
 	if (p_mesh_id < 0 || p_mesh_id >= Terrain3DAssets::MAX_MESHES) {

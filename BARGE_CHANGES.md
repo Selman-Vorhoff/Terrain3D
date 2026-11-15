@@ -155,10 +155,12 @@ Each change gets a section:
   streaming, regions can be added at any location up to ±2^19 (`REGION_LOCATION_LIMIT`, so
   vertex coordinates stay inside int32); resident regions outside the window stay loaded
   for data queries and collision and are not drawn (since entry 5 they hold no GPU slot).
-- **Data queries do not depend on the window.** While streaming, `get_region_id` is the slot
-  looked up by location, so `has_region`, `get_normal`, `get_pixel`, `get_control`,
-  `get_region_idp` and the CPU region blend answer the same for every window position.
-  Collision already read regions by location.
+- **Data queries do not depend on the window.** While streaming, `has_region`,
+  `get_height`, `get_normal`, `get_pixel`, `get_control` and the CPU region blend answer
+  from the resident regions by location, the same for every window position. Collision
+  already read regions by location. `get_region_id` / `get_region_idp` are the GPU slot,
+  which since entry 5 depends on the window (−1 outside it); use `has_region` for
+  residency.
 - **Classic mode is unchanged:** without `enable_streaming` the window stays at the stock
   default (the setter refuses), and `add_region` still refuses locations outside −16..15,
   because classic region ids are rebuilt from the window.
@@ -221,8 +223,16 @@ Each change gets a section:
   eviction or the window moving). The data stays usable and the mistake is visible,
   instead of refusing the region.
 - **Edits:** `update_maps()` syncs changed resident regions whether drawn or not (entry 3):
-  drawn ones re-upload, data-only ones refresh collision, and their current maps are
-  uploaded whenever they later take a slot.
+  each changed region recalculates its height range (mesher AABBs) and refreshes
+  collision; drawn ones also re-upload. A region that changed while data only and then
+  takes a slot does the same sync when it attaches, so the upload cannot hide a pending
+  collision refresh. `set_height` (any height `set_pixel`) grows the region's height range
+  at once.
+- **Instancer:** meshes are built only for regions holding a slot, checked in
+  `_update_mmi_by_region`, so global rebuilds (`update_mmis()`, hiding and showing the
+  terrain) obey it too. Eviction destroys a region's meshes whether or not it held a slot.
+- **Stats:** every upload (insert inside the window, replacement, window arrival, edit) is
+  timed and counted in `uploads`; `upload_usec_mean` is per upload.
 - **Why:** in co-op the host keeps physics ground around every remote player
   (`Management/Planning/terrain_streaming_multiplayer.md` in the game repository) but
   never draws it. With a slot per resident region, that ground cost about 13 MB of VRAM
@@ -230,12 +240,16 @@ Each change gets a section:
 - **API changes:** `get_streaming_stats` adds `regions_resident`, `regions_undrawn` and
   `uploads`; `slots_used` counts drawn regions. `get_region_id` is the GPU layer (−1 when
   not drawn); use `has_region` for residency.
-- **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d_instancer.cpp` (commit adfe38d).
+- **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d_instancer.cpp` (commit adfe38d,
+  review fixes in the commit after it).
 - **Test:** `project/tests/test_window_slots.gd`: data-only regions outside the window
   answer height and normal; an edit made while data only reaches the GPU when the window
   arrives (readback when windowed); slots return when the window leaves; a full window
   leaves one region undrawn until an eviction hands it a slot; replacing a data-only
   region keeps it data only. `test_region_window.gd` checks at every window position that
   exactly the resident regions inside it hold slots; `test_slot_pool.gd` covers the full
-  pool.
+  pool. `test_window_slots_sync.gd` (Codex review regressions): an image replaced while data
+  only reaches collision and the height range after the window arrives; `set_height` raises
+  the height range; instancer meshes exist only while drawn, through a global rebuild and
+  eviction (counts when windowed); upload accounting.
 - **Upstream:** none; belongs with the window change (entry 4).

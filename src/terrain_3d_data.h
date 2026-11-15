@@ -126,6 +126,8 @@ private:
 	Error _pool_check_maps(const Vector2i &p_loc, const Ref<Image> p_maps[3]) const;
 	void _pool_upload(const int p_slot, const Vector2i &p_loc, const Ref<Image> p_maps[3]);
 	void _pool_remember(const Vector2i &p_loc, const Ref<Image> p_maps[3]);
+	bool _pool_changed(const Vector2i &p_loc, const Terrain3DRegion *p_region, const Ref<Image> p_maps[3]) const;
+	void _pool_sync_data(const Vector2i &p_loc, Terrain3DRegion *p_region);
 	bool _pool_attach(const Vector2i &p_loc);
 	void _pool_detach(const Vector2i &p_loc);
 	void _pool_fill_undrawn();
