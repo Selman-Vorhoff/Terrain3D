@@ -9,6 +9,7 @@ extends SceneTree
 ## expect-error: Collision target is null
 ## expect-error: Collision target radius must be above 0 m
 ## expect-error: m limit
+## expect-error: Cannot find clipmap target or active camera
 ## The world background blend check needs material uniforms, which only a real renderer
 ## has: tools/terrain3d_fork/test.py --windowed collision_targets
 

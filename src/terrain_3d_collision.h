@@ -75,6 +75,8 @@ private:
 
 	bool _uses_targets() const { return !_targets.empty(); }
 	int _blend_margin_regions() const;
+	bool _heights_refresh_queued = false;
+	void _apply_heights_changed();
 	int _shape_create();
 	int _shape_count() const;
 	bool _fill_cell(const int p_shape_id, const Vector2i &p_cell);
@@ -112,6 +114,9 @@ public:
 	// Barge Game addition: several collision targets, radius in metres.
 	void add_target(Node3D *p_node, const real_t p_radius_m);
 	bool has_targets() const { return !_targets.empty(); }
+	// Barge Game addition: material settings that change the modified heights changed;
+	// refills (dynamic) or rebuilds (full) once, deferred.
+	void heights_changed();
 	void remove_target(Node3D *p_node);
 	void clear_targets();
 	TypedArray<Node3D> get_targets() const;

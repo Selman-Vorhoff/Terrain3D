@@ -663,6 +663,29 @@ void Terrain3DCollision::flush_region_changes() {
 	_dirty_residency.clear();
 }
 
+// Barge Game addition. Deferred and coalesced: dragging a material slider queues one
+// refresh per frame at most.
+void Terrain3DCollision::heights_changed() {
+	if (_heights_refresh_queued) {
+		return;
+	}
+	_heights_refresh_queued = true;
+	callable_mp(this, &Terrain3DCollision::_apply_heights_changed).call_deferred();
+}
+
+void Terrain3DCollision::_apply_heights_changed() {
+	_heights_refresh_queued = false;
+	if (!_initialized || !is_enabled() || _terrain == nullptr) {
+		return;
+	}
+	LOG(DEBUG, "Material heights changed, refreshing collision");
+	if (is_dynamic_mode()) {
+		update(V2I_MAX, true);
+	} else {
+		build();
+	}
+}
+
 void Terrain3DCollision::add_target(Node3D *p_node, const real_t p_radius_m) {
 	if (p_node == nullptr) {
 		LOG(ERROR, "Collision target is null");

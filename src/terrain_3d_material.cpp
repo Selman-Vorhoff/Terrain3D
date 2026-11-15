@@ -901,6 +901,7 @@ void Terrain3DMaterial::set_world_background(const WorldBackground p_background)
 	SET_IF_DIFF(_world_background, p_background);
 	LOG(INFO, "Enable world background: ", _world_background);
 	_update_shader();
+	_heights_changed(); // Barge Game: the background changes the modified heights
 }
 
 void Terrain3DMaterial::set_texture_filtering(const TextureFiltering p_filtering) {
@@ -1380,7 +1381,19 @@ bool Terrain3DMaterial::_set(const StringName &p_name, const Variant &p_property
 		RS->material_set_param(_material, p_name, p_property);
 		RS->material_set_param(_buffer_material, p_name, p_property);
 	}
+	// Barge Game: these two shape the world background blend in get_modified_height()
+	if (p_name == StringName("ground_level") || p_name == StringName("region_blend")) {
+		_heights_changed();
+	}
 	return true;
+}
+
+// Barge Game addition. Settings that feed Terrain3DData::get_modified_height() changed, so
+// collision, built from it, refreshes (stock left it stale until the next rebuild).
+void Terrain3DMaterial::_heights_changed() {
+	if (_terrain != nullptr && _terrain->get_collision() != nullptr) {
+		_terrain->get_collision()->heights_changed();
+	}
 }
 
 // This is called 200x more than the others, every second the material is open in the

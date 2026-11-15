@@ -46,6 +46,7 @@ public: // Constants
 
 private:
 	Terrain3D *_terrain = nullptr;
+	void _heights_changed(); // Barge Game addition
 
 	RID _material;
 	Ref<Shader> _shader; // Active shader

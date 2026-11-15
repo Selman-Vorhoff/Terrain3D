@@ -351,6 +351,12 @@ Each change gets a section:
     regions depend on x alone or on z alone), with the same float operations in the same
     order, and residency is looked up once per region around the block.
   `get_region_blend()` and the single `get_modified_height()` are unchanged.
+- **Build flag:** bit-exactness needs the compiler not to fuse multiplies and adds
+  differently in the two paths (a Codex probe reproduced mismatches with FMA contraction
+  on, GCC `-mfma -ffp-contract=fast`, MSVC `/arch:AVX2 /fp:contract`). `SConstruct`
+  therefore builds with `-ffp-contract=off` (GCC/Clang) and `/fp:precise` (MSVC, which
+  contracts only with `/fp:contract`). This also keeps Windows and Linux builds on the
+  same float results, which the cross-platform determinism gate needs.
 - **Also:** `Terrain3DCollision::region_changed()` takes whether the region arrived or left.
   Only then do neighbouring shapes refill for the blend (entry 6); new data in a resident
   region refills only its own shapes.
@@ -363,11 +369,28 @@ Each change gets a section:
   - region under a target replaced (112 shapes, including about 20 ms for the region
     insert itself): 416 ms → 30 ms.
   What is left is mostly the physics server building each heightmap shape.
-- **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d_collision.{h,cpp}`.
+- **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d_collision.{h,cpp}`, `SConstruct`.
 - **Test:** `project/tests/test_collision_fill.gd` reads every vertex of every placed shape
-  back from the physics server and compares it bit for bit with `get_surface_height()`.
+  back from the physics server and compares its bits (at the shape array's precision,
+  signed zeros included; any NaN equals any NaN, since NaN only means "no ground") with
+  `get_surface_height()`.
   It covers random heights with holes over regions with a gap and the blend on (windowed:
   it checks the blend changed vertices), a gap filled and a region replaced (region
-  flushes), the blend off, and the stock single target. `test_collision_targets_perf.gd`
-  logs the times.
+  flushes), the blend off, material settings changed (entry 9), and the stock single
+  target. `test_collision_targets_perf.gd` logs the times.
 - **Upstream:** could be offered: it is a pure speed-up of the stock collision path.
+
+### 9. Collision follows the material settings that change heights
+
+- **What:** changing the world background, `ground_level` or `region_blend` on the
+  material refreshes collision: dynamic collision refills its shapes, full collision
+  rebuilds. The refresh is deferred and coalesced (one per frame while a slider is dragged).
+- **Why:** these settings change `get_modified_height()`, which collision is built from.
+  Stock left collision stale until something else rebuilt it, so data queries and physics
+  disagreed. A Codex probe moved the ground level from −3 to 100 and found 5,949 of 6,358
+  sampled vertices still at the old height.
+- **Files:** `src/terrain_3d_material.{h,cpp}`, `src/terrain_3d_collision.{h,cpp}`.
+- **Test:** `project/tests/test_collision_fill.gd` (windowed: the headless renderer has no
+  material uniforms) changes the ground level and blend, then compares every collision
+  vertex with the data.
+- **Upstream:** could be offered (a stock bug).

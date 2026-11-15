@@ -6,6 +6,15 @@ import os
 # TODO: Do not copy environment after godot-cpp/test is updated <https://github.com/godotengine/godot-cpp/blob/master/test/SConstruct>.
 env = SConscript("godot-cpp/SConstruct")
 
+# Barge Game addition: no floating-point contraction (fused multiply-add), so the block
+# collision fill matches the single height read bit for bit and builds agree across
+# compilers and CPU flags (BARGE_CHANGES.md entry 8). MSVC since VS 2022 contracts only
+# with /fp:contract, which /fp:precise does not imply.
+if env.get("is_msvc", False):
+    env.Append(CCFLAGS=["/fp:precise"])
+else:
+    env.Append(CCFLAGS=["-ffp-contract=off"])
+
 # Add source files.
 env.Append(CPPPATH=["src/"])
 sources = Glob("src/*.cpp")

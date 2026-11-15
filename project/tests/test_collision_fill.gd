@@ -53,8 +53,14 @@ func _region(loc: Vector2i, rng: RandomNumberGenerator) -> Terrain3DRegion:
 	return r
 
 
-func _same(a: float, b: float) -> bool:
-	return (is_nan(a) and is_nan(b)) or a == b
+## Same bits at the shape array's precision. NaN means "no ground" (hole or no region)
+## and its payload carries nothing, so any NaN equals any NaN; signed zeros differ.
+func _same(got: float, want: float, double: bool) -> bool:
+	if is_nan(got) or is_nan(want):
+		return is_nan(got) and is_nan(want)
+	if double:
+		return PackedFloat64Array([got]).to_byte_array() == PackedFloat64Array([want]).to_byte_array()
+	return PackedFloat32Array([got]).to_byte_array() == PackedFloat32Array([want]).to_byte_array()
 
 
 ## Compares every vertex of every enabled shape with get_surface_height. Returns
@@ -75,18 +81,19 @@ func _compare(label: String) -> Array:
 		if origin.x > 1.0e20:
 			continue
 		var data: Dictionary = PhysicsServer3D.shape_get_data(PhysicsServer3D.body_get_shape(body, i))
-		var heights: PackedFloat32Array = data["heights"]
+		var heights = data["heights"] # PackedFloat32Array, or 64 in a double build
+		var double: bool = heights is PackedFloat64Array
 		var top_left := Vector2i(roundi(origin.x / SPACING) - SHAPE / 2, roundi(origin.z / SPACING) - SHAPE / 2)
 		shapes += 1
 		for z in hs:
 			for x in hs:
-				var got := heights[hs - 1 - z + x * hs]
+				var got: float = heights[hs - 1 - z + x * hs]
 				var p := Vector3((top_left.x + x) * SPACING, 0.0, (top_left.y + z) * SPACING)
 				var want := d.get_surface_height(p)
 				compared += 1
 				if not is_nan(want) and want != d.get_height(p):
 					blended += 1
-				if not _same(got, want):
+				if not _same(got, want, double):
 					wrong += 1
 					if wrong <= 5:
 						print("  %s mismatch at %s: shape %s, data %s" % [label, p, got, want])
@@ -150,6 +157,14 @@ func _run() -> void:
 	_t.collision.update(Vector2i(2147483647, 2147483647), true)
 	r = _compare("NONE")
 	ok(r[1] == 0 and r[0] > 0, "NONE background: every vertex matches (%d wrong of %d)" % [r[1], r[0]])
+
+	# Material settings that shape the blend refresh collision (stock left it stale).
+	_t.material.world_background = Terrain3DMaterial.FLAT
+	_t.material.set("ground_level", 25.0)
+	_t.material.set("region_blend", 0.3)
+	await _frames()
+	r = _compare("material changed")
+	ok(r[1] == 0 and r[0] > 0, "after ground level and blend changed: every vertex matches (%d wrong of %d)" % [r[1], r[0]])
 
 	# The stock single target fills through the same block read.
 	_t.material.world_background = Terrain3DMaterial.FLAT
