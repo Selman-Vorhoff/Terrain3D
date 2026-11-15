@@ -770,6 +770,12 @@ void Terrain3D::snap() {
 }
 
 void Terrain3D::set_material(const Ref<Terrain3DMaterial> &p_material) {
+	// Barge Game: a new material re-initializes the terrain and brings its own max_regions,
+	// which the streaming pool's slots depend on.
+	if (_data != nullptr && _data->is_streaming() && p_material != _material) {
+		LOG(ERROR, "The material cannot be replaced while streaming; edit the current one instead");
+		return;
+	}
 	SET_IF_DIFF(_material, p_material);
 	LOG(INFO, "Setting material");
 	_initialized = false;

@@ -395,8 +395,13 @@ void Terrain3DCollision::region_changed(const Vector2i &p_region_loc) {
 	Vector2 hi = lo + Vector2(region_size, region_size);
 	Vector2 t = Vector2(target.x, target.z);
 	Vector2 nearest = Vector2(CLAMP(t.x, lo.x, hi.x), CLAMP(t.y, lo.y, hi.y));
-	real_t reach = real_t(_radius) + real_t(_shape_size);
-	if (nearest.distance_squared_to(t) <= reach * reach) {
+	// Conservative square bound: shapes are placed around the target snapped to the shape
+	// grid (up to one shape away), reach one shape size out and sample one border vertex
+	// past their edge. A false positive costs an in-place refresh; a miss leaves stale
+	// collision over an evicted region.
+	real_t reach = real_t(_radius) + 2.0 * real_t(_shape_size) + 2.0;
+	Vector2 d = (nearest - t).abs();
+	if (MAX(d.x, d.y) <= reach) {
 		_region_refresh_pending = true;
 	}
 }

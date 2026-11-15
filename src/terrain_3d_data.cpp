@@ -24,6 +24,8 @@ void Terrain3DData::_clear() {
 	_slot_locs.clear();
 	_pool_signals_pending = false;
 	_pool_bytes_per_slot = 0;
+	_pool_uploaded_ids.clear();
+	_pool_dirty.clear();
 	_region_window_origin = DEFAULT_REGION_WINDOW_ORIGIN;
 	_region_map_dirty = true;
 	_region_map.clear();
@@ -504,7 +506,14 @@ void Terrain3DData::load_region(const Vector2i &p_region_loc, const String &p_di
 		LOG(ERROR, "Cannot load region at ", path);
 		return;
 	}
-	if (_regions.is_empty()) {
+	if (_streaming) {
+		// Barge Game: the pool's layers have a fixed size, even after the last eviction.
+		if (region->get_region_size() != _region_size) {
+			LOG(ERROR, "Region ", p_region_loc, " is ", region->get_region_size(), " px but the streaming pool is ",
+					_region_size, " px; not loaded");
+			return;
+		}
+	} else if (_regions.is_empty()) {
 		_terrain->set_region_size((Terrain3D::RegionSize)region->get_region_size());
 	} else {
 		if (_terrain->get_region_size() != (Terrain3D::RegionSize)region->get_region_size()) {
@@ -636,7 +645,10 @@ Error Terrain3DData::_pool_create_arrays(const Terrain3DRegion *p_region) {
 	for (int t = 0; t < 3; t++) {
 		_pool_layer_format[t] = maps[t]->get_format();
 		_pool_layer_mipmaps[t] = maps[t]->has_mipmaps();
+		_pool_layer_size[t] = maps[t]->get_size();
 	}
+	_pool_uploaded_ids.resize(_slot_capacity * 3);
+	_pool_uploaded_ids.fill(0);
 	LOG(INFO, "Streaming pool allocated: ", _slot_capacity, " slots, about ",
 			(_pool_bytes_per_slot * _slot_capacity) / (1024 * 1024), " MB of texture memory");
 	return OK;
@@ -676,21 +688,19 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 		if (_pool_create_arrays(p_region.ptr()) != OK) {
 			return FAILED;
 		}
-	} else {
-		// texture_2d_update needs the exact layer format, size and mipmap state.
-		for (int t = 0; t < 3; t++) {
-			if (maps[t].is_null() || maps[t]->is_empty() || maps[t]->get_format() != _pool_layer_format[t] ||
-					maps[t]->get_size() != _region_sizev || maps[t]->has_mipmaps() != _pool_layer_mipmaps[t]) {
-				LOG(ERROR, "Region ", loc, " ", TYPESTR[t], " map does not match the pool's format, size or mipmaps");
-				return FAILED;
-			}
-		}
+	} else if (_pool_check_maps(loc, maps) != OK) {
+		return FAILED;
 	}
 
 	int slot;
 	if (replacing) {
 		slot = _slot_of[loc];
 		LOG(INFO, "Replacing resident region at ", loc, " in slot ", slot);
+		// The per region instancer update below only visits what the new region holds;
+		// meshes or cells the old one had would keep rendering.
+		if (_terrain->get_instancer() != nullptr) {
+			_terrain->get_instancer()->destroy_mmis_by_region(loc);
+		}
 	} else {
 		slot = _free_slots[_free_slots.size() - 1];
 		_free_slots.remove_at(_free_slots.size() - 1);
@@ -706,10 +716,9 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 		_region_map[map_index] = slot + 1;
 	}
 
+	_pool_dirty.erase(loc);
 	uint64_t start = Time::get_singleton()->get_ticks_usec();
-	_generated_height_maps.update(maps[TYPE_HEIGHT], slot);
-	_generated_control_maps.update(maps[TYPE_CONTROL], slot);
-	_generated_color_maps.update(maps[TYPE_COLOR], slot);
+	_pool_upload(slot, maps);
 	uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
 	_pool_inserts++;
 	_pool_upload_usec_last = usec;
@@ -749,6 +758,7 @@ Error Terrain3DData::evict_region(const Vector2i &p_region_loc, const bool p_upd
 		_region_map[map_index] = 0; // the stale texture layer is now unreachable
 	}
 	_regions.erase(p_region_loc);
+	_pool_dirty.erase(p_region_loc);
 	int idx = _region_locations.find(p_region_loc);
 	if (idx >= 0) {
 		_region_locations.remove_at(idx);
@@ -818,6 +828,77 @@ void Terrain3DData::set_region_window_origin(const Vector2i &p_origin) {
 	emit_signal("maps_changed");
 }
 
+// Checks a region's maps against the allocated layers: texture_2d_update needs the exact
+// format, size and mipmap state, and the layer size never changes after allocation.
+Error Terrain3DData::_pool_check_maps(const Vector2i &p_loc, const Ref<Image> p_maps[3]) const {
+	for (int t = 0; t < 3; t++) {
+		if (p_maps[t].is_null() || p_maps[t]->is_empty() || p_maps[t]->get_format() != _pool_layer_format[t] ||
+				p_maps[t]->get_size() != _pool_layer_size[t] || p_maps[t]->has_mipmaps() != _pool_layer_mipmaps[t]) {
+			LOG(ERROR, "Region ", p_loc, " ", TYPESTR[t], " map does not match the pool's format, size or mipmaps");
+			return FAILED;
+		}
+	}
+	return OK;
+}
+
+void Terrain3DData::_pool_upload(const int p_slot, const Ref<Image> p_maps[3]) {
+	_generated_height_maps.update(p_maps[TYPE_HEIGHT], p_slot);
+	_generated_control_maps.update(p_maps[TYPE_CONTROL], p_slot);
+	_generated_color_maps.update(p_maps[TYPE_COLOR], p_slot);
+	for (int t = 0; t < 3; t++) {
+		_pool_uploaded_ids.set(p_slot * 3 + t, p_maps[t]->get_instance_id());
+	}
+}
+
+// update_maps() while streaming. Re-uploads the layers of resident regions that changed
+// since their upload: edited (flag), written through set_pixel / set_height and friends,
+// given new map images (region.set_height_map), or all of them when update_maps just
+// regenerated every colour map's mipmaps. Pixels written straight into a region's Image are not seen: mark
+// the region edited or add it again. Unchanged regions cost nothing, so the batched
+// add_region(..., false) + update_maps() pattern stays cheap.
+void Terrain3DData::_pool_update_changed(const bool p_all_mipmaps_regenerated) {
+	if (!_generated_height_maps.get_rid().is_valid()) {
+		_pool_dirty.clear();
+		return;
+	}
+	for (const KeyValue<Vector2i, int> &kv : _slot_of) {
+		Terrain3DRegion *region = get_region_ptr(kv.key);
+		if (!region) {
+			continue;
+		}
+		Ref<Image> maps[3] = { region->get_height_map(), region->get_control_map(), region->get_active_color_map() };
+		bool changed = p_all_mipmaps_regenerated || region->is_edited() || _pool_dirty.has(kv.key);
+		for (int t = 0; t < 3 && !changed; t++) {
+			changed = maps[t].is_null() || maps[t]->get_instance_id() != _pool_uploaded_ids[kv.value * 3 + t];
+		}
+		if (!changed) {
+			continue;
+		}
+		if (_pool_check_maps(kv.key, maps) != OK) {
+			continue; // the old layer stays; the error says why
+		}
+		_pool_upload(kv.value, maps);
+		region->set_edited(false);
+		if (_terrain->get_collision() != nullptr) {
+			_terrain->get_collision()->region_changed(kv.key);
+		}
+		_pool_signals_pending = true;
+		LOG(DEBUG, "Re-uploaded changed resident region ", kv.key, " in slot ", kv.value);
+	}
+	_pool_dirty.clear();
+}
+
+TypedArray<Image> Terrain3DData::_pool_resident_maps(const MapType p_type) const {
+	TypedArray<Image> maps;
+	for (const Vector2i &loc : _region_locations) {
+		const Terrain3DRegion *region = get_region_ptr(loc);
+		if (region) {
+			maps.push_back(p_type == TYPE_COLOR ? region->get_active_color_map() : region->get_map(p_type));
+		}
+	}
+	return maps;
+}
+
 Dictionary Terrain3DData::get_streaming_stats() const {
 	Dictionary stats;
 	stats["streaming"] = _streaming;
@@ -864,6 +945,7 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 	// back by inserts or evictions with p_update = false are sent here.
 	if (_streaming) {
 		_region_map_dirty = false;
+		_pool_update_changed(p_generate_mipmaps && p_all_regions && (p_map_type == TYPE_COLOR || p_map_type == TYPE_MAX));
 		_pool_emit_signals();
 	}
 	// Mark texture arrays dirty for rebuilding
@@ -1033,6 +1115,9 @@ void Terrain3DData::set_pixel(const MapType p_map_type, const Vector3 &p_global_
 	if (map) {
 		map->set_pixelv(vgrid_to_pixelv(vgrid), p_pixel);
 		region->set_modified(true);
+		if (_streaming) {
+			_pool_dirty.insert(region_loc); // uploaded by the next update_maps()
+		}
 	}
 }
 

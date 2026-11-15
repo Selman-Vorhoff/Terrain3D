@@ -3,6 +3,7 @@
 #ifndef TERRAIN3D_DATA_CLASS_H
 #define TERRAIN3D_DATA_CLASS_H
 
+#include <godot_cpp/templates/hash_set.hpp>
 #include "constants.h"
 #include "generated_texture.h"
 #include "terrain_3d_region.h"
@@ -109,6 +110,15 @@ private:
 	int64_t _pool_bytes_per_slot = 0;
 	Image::Format _pool_layer_format[3] = { Image::FORMAT_MAX, Image::FORMAT_MAX, Image::FORMAT_MAX }; // per MapType
 	bool _pool_layer_mipmaps[3] = { false, false, false };
+	Vector2i _pool_layer_size[3];
+	// Per slot, the instance ids of the three images last uploaded, so update_maps() can
+	// tell which resident regions got new map images.
+	Vector<uint64_t> _pool_uploaded_ids;
+	HashSet<Vector2i> _pool_dirty; // resident regions changed through set_pixel
+	Error _pool_check_maps(const Vector2i &p_loc, const Ref<Image> p_maps[3]) const;
+	void _pool_upload(const int p_slot, const Ref<Image> p_maps[3]);
+	void _pool_update_changed(const bool p_all_mipmaps_regenerated);
+	TypedArray<Image> _pool_resident_maps(const MapType p_type) const;
 
 	// Functions
 	void _clear();
@@ -188,9 +198,11 @@ public:
 	void load_region(const Vector2i &p_region_loc, const String &p_dir, const bool p_update = true);
 
 	// Maps
-	TypedArray<Image> get_height_maps() const { return _height_maps; }
-	TypedArray<Image> get_control_maps() const { return _control_maps; }
-	TypedArray<Image> get_color_maps() const { return _color_maps; }
+	// Barge Game: while streaming these list the resident regions' maps in
+	// get_region_locations() order, built on demand (not slot order, not texture layers).
+	TypedArray<Image> get_height_maps() const { return _streaming ? _pool_resident_maps(TYPE_HEIGHT) : _height_maps; }
+	TypedArray<Image> get_control_maps() const { return _streaming ? _pool_resident_maps(TYPE_CONTROL) : _control_maps; }
+	TypedArray<Image> get_color_maps() const { return _streaming ? _pool_resident_maps(TYPE_COLOR) : _color_maps; }
 	TypedArray<Image> get_maps(const MapType p_map_type) const;
 	void update_maps(const MapType p_map_type = TYPE_MAX, const bool p_all_regions = true, const bool p_generate_mipmaps = false);
 	RID get_height_maps_rid() const { return _generated_height_maps.get_rid(); }

@@ -109,6 +109,23 @@ Each change gets a section:
     372 for 1024 px). Stats report `bytes_allocated` (whole capacity) and `bytes_resident`.
   - The editor is refused (`enable_streaming` is runtime only); `set_region_locations`,
     `change_region_size` and `load_directory` refuse while streaming.
+  - Changing a resident region: `update_maps()` re-uploads the layers of resident regions
+    that changed since their upload: written through `set_pixel` / `set_height` and the
+    other setters, given new map images (`region.set_height_map`), flagged edited, or all
+    of them after a full colour mipmap regeneration. Unchanged regions cost nothing, so
+    `add_region(r, false)` … `update_maps()` stays cheap. Pixels written straight into a
+    region's `Image` are not seen; flag the region edited or add it again (same slot).
+  - The pool's layer size, format and mipmap state are fixed at allocation, even after the
+    last eviction: `load_region` refuses another region size instead of adopting it.
+  - Replacing a resident region first destroys its instancer meshes, so meshes or cells
+    the new region lacks stop rendering.
+  - `Terrain3DMaterial.max_regions` cannot drop below the slot capacity, and the material
+    cannot be replaced while streaming (a new one re-initializes the terrain).
+  - `get_height_maps` / `get_control_maps` / `get_color_maps` list the resident regions'
+    maps in `get_region_locations()` order, built on demand (not slot order).
+  - Collision refresh after an insert or eviction uses a conservative square bound
+    (radius + two shape sizes + border), because shapes sit on a snapped grid and sample
+    one vertex past their edge.
   - #1004's material `FULL_REBUILD` fix is not needed: v1.1.0-stable already tests all bits.
 - **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d.{h,cpp}`,
   `src/terrain_3d_collision.{h,cpp}`, `src/terrain_3d_instancer.{h,cpp}`,
@@ -120,7 +137,11 @@ Each change gets a section:
   exhaustion, refused operations. Run it with `--windowed` too: headless uses a dummy
   renderer and does not upload textures. `test_pool_d3d12_limit.gd` (D3D12 only:
   `test.py --windowed --driver d3d12`): one slot over the limit is refused with nothing
-  resident, the limit itself works.
+  resident, the limit itself works. `test_slot_pool_edits.gd`: set_height and new images
+  reach the GPU layers, replacement and slot reuse carry all three maps (GPU readback
+  when windowed), collision refreshes over an evicted neighbour, a drained pool refuses
+  another region size, getters, max_regions and material guards. The instancer change on
+  replacement has no automated check (its meshes are bare RenderingServer instances).
 - **Upstream:** draft PR #1004 covers the idea; our fixes above could go back to it.
 
 ### 4. A region window placed by the game, not fixed at the origin
