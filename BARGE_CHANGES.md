@@ -291,7 +291,8 @@ Each change gets a section:
     Terrain3D finds no camera and no clipmap target. Stock stops physics processing then.
     The meshes then snap to the origin fallback. Processing resumes when a camera is set
     (stock only resumed for a clipmap target), when dynamic collision with targets is
-    re-entered from another mode, and when a target is added or its radius changed.
+    re-entered from another mode with something to follow, and when a target is added or
+    its radius changed.
   - Radii must be finite, above 0 and at most 4096 m.
   - Full collision modes ignore the targets.
 - **Stats:** `Terrain3DCollision.get_stats()`: `targets`, `shapes_total`, `shapes_active`,
@@ -355,8 +356,11 @@ Each change gets a section:
   differently in the two paths (a Codex probe reproduced mismatches with FMA contraction
   on, GCC `-mfma -ffp-contract=fast`, MSVC `/arch:AVX2 /fp:contract`). `SConstruct`
   therefore builds with `-ffp-contract=off` (GCC/Clang) and `/fp:precise` (MSVC, which
-  contracts only with `/fp:contract`). This also keeps Windows and Linux builds on the
-  same float results, which the cross-platform determinism gate needs.
+  contracts only with `/fp:contract`). It does **not** make Windows and Linux agree: the
+  world background blend (stock maths) calls the platform's `exp`/`log`. A Codex probe
+  found 3 float results in 1.6 million that differ between MSVC and GCC. Heights without
+  the blend (background NONE, or away from its reach) are plain copies. Cross-platform
+  agreement is the determinism gate (game issue #90ed1f).
 - **Also:** `Terrain3DCollision::region_changed()` takes whether the region arrived or left.
   Only then do neighbouring shapes refill for the blend (entry 6); new data in a resident
   region refills only its own shapes.
@@ -384,13 +388,16 @@ Each change gets a section:
 
 - **What:** changing the world background, `ground_level` or `region_blend` on the
   material refreshes collision: dynamic collision refills its shapes, full collision
-  rebuilds. The refresh is deferred and coalesced (one per frame while a slider is dragged).
+  rebuilds. Resetting either uniform to its default counts too, and the reset now clears
+  the buffer material's copy as well, which stock left behind. The refresh is deferred and
+  coalesced (one per frame while a slider is dragged).
 - **Why:** these settings change `get_modified_height()`, which collision is built from.
   Stock left collision stale until something else rebuilt it, so data queries and physics
   disagreed. A Codex probe moved the ground level from −3 to 100 and found 5,949 of 6,358
   sampled vertices still at the old height.
 - **Files:** `src/terrain_3d_material.{h,cpp}`, `src/terrain_3d_collision.{h,cpp}`.
 - **Test:** `project/tests/test_collision_fill.gd` (windowed: the headless renderer has no
-  material uniforms) changes the ground level and blend, then compares every collision
-  vertex with the data.
+  material uniforms) changes the background, the ground level and the blend one at a time,
+  then resets each uniform to its default. After each step it compares every collision
+  vertex with the data, with no manual refresh.
 - **Upstream:** could be offered (a stock bug).

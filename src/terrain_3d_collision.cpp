@@ -832,8 +832,9 @@ void Terrain3DCollision::set_mode(const CollisionMode p_mode) {
 		destroy();
 	}
 	// Barge Game: processing may have stopped (no camera) while collision was disabled or
-	// full; dynamic collision with targets needs it again.
-	if (is_dynamic_mode() && _uses_targets() && _terrain != nullptr) {
+	// full; dynamic collision with something to follow (registered targets or the stock
+	// collision_target, as in Terrain3D::_grab_camera()) needs it again.
+	if (is_dynamic_mode() && _terrain != nullptr && (_uses_targets() || _terrain->get_collision_target() != nullptr)) {
 		_terrain->set_physics_process(true);
 	}
 }

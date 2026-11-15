@@ -1360,7 +1360,12 @@ bool Terrain3DMaterial::_set(const StringName &p_name, const Variant &p_property
 	IS_INIT_COND(!_active_params.has(p_name), Resource::_set(p_name, p_property));
 	if (p_property.get_type() == Variant::NIL) {
 		RS->material_set_param(_material, p_name, Variant());
+		RS->material_set_param(_buffer_material, p_name, Variant()); // Barge Game: stock left the buffer's copy
 		_shader_params.erase(p_name);
+		// Barge Game: a reset to the default changes the blend like any other value
+		if (p_name == StringName("ground_level") || p_name == StringName("region_blend")) {
+			_heights_changed();
+		}
 		return true;
 	}
 

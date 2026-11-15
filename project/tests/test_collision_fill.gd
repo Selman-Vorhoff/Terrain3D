@@ -158,13 +158,29 @@ func _run() -> void:
 	r = _compare("NONE")
 	ok(r[1] == 0 and r[0] > 0, "NONE background: every vertex matches (%d wrong of %d)" % [r[1], r[0]])
 
-	# Material settings that shape the blend refresh collision (stock left it stale).
-	_t.material.world_background = Terrain3DMaterial.FLAT
-	_t.material.set("ground_level", 25.0)
-	_t.material.set("region_blend", 0.3)
-	await _frames()
-	r = _compare("material changed")
-	ok(r[1] == 0 and r[0] > 0, "after ground level and blend changed: every vertex matches (%d wrong of %d)" % [r[1], r[0]])
+	# Material settings that shape the blend refresh collision (stock left it stale). One
+	# change at a time, no manual refresh, so each notification is checked on its own.
+	var steps := [
+		["background FLAT", func() -> void: _t.material.world_background = Terrain3DMaterial.FLAT],
+		["ground level 25", func() -> void: _t.material.set("ground_level", 25.0)],
+		["region blend 0.3", func() -> void: _t.material.set("region_blend", 0.3)],
+		["ground level reset", func() -> void: _t.material.set("ground_level", null)],
+		["region blend reset", func() -> void: _t.material.set("region_blend", null)],
+	]
+	var windowed := DisplayServer.get_name() != "headless"
+	# A vertex next to the missing region (299, 300), inside the target's collision: the
+	# blend reaches it, so every step changes its height.
+	var probe := Vector3(300 * region_m + 0.5, 0.0, 301 * region_m - 5.0)
+	for step: Array in steps:
+		var before := d.get_surface_height(probe)
+		(step[1] as Callable).call()
+		await _frames()
+		r = _compare(step[0])
+		ok(r[1] == 0 and r[0] > 0, "after %s: every vertex matches (%d wrong of %d)" % [step[0], r[1], r[0]])
+		if windowed:
+			# Otherwise the match above would prove nothing about the refresh.
+			var after := d.get_surface_height(probe)
+			ok(after != before, "%s changed the data (%s -> %s)" % [step[0], before, after])
 
 	# The stock single target fills through the same block read.
 	_t.material.world_background = Terrain3DMaterial.FLAT

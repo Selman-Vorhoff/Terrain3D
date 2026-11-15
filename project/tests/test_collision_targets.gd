@@ -273,6 +273,15 @@ func _run() -> void:
 	await _frames(5)
 	ok(is_equal_approx(_ray(b + Vector3(1, 0, 1)), 30.0), "no camera, stock target: ground follows it (%s)" % _ray(b + Vector3(1, 0, 1)))
 	ok(_t.is_physics_processing(), "no camera, stock target: processing stays on")
+	for mode in [0, 3]: # Disabled, Full / Game, then back: the stock target is followed again
+		_t.collision_mode = mode
+		await _frames()
+		_t.collision_mode = 1
+		stock_target.global_position = a if stock_target.global_position == b else b
+		await _frames(5)
+		var want_h := 10.0 if stock_target.global_position == a else 30.0
+		ok(is_equal_approx(_ray(stock_target.global_position + Vector3(1, 0, 1)), want_h),
+				"no camera, stock target, mode %d -> dynamic: ground follows it" % mode)
 	# Nothing to follow: processing stops (stock); a camera alone resumes it.
 	_t.set_collision_target(null)
 	await _frames()

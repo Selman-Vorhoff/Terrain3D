@@ -7,9 +7,10 @@ import os
 env = SConscript("godot-cpp/SConstruct")
 
 # Barge Game addition: no floating-point contraction (fused multiply-add), so the block
-# collision fill matches the single height read bit for bit and builds agree across
-# compilers and CPU flags (BARGE_CHANGES.md entry 8). MSVC since VS 2022 contracts only
-# with /fp:contract, which /fp:precise does not imply.
+# collision fill matches the single height read bit for bit within a build, whatever the
+# CPU flags (BARGE_CHANGES.md entry 8). MSVC since VS 2022 contracts only with
+# /fp:contract, which /fp:precise does not imply. This does not make Windows and Linux
+# agree: the world background blend calls the platform's exp/log.
 if env.get("is_msvc", False):
     env.Append(CCFLAGS=["/fp:precise"])
 else:
