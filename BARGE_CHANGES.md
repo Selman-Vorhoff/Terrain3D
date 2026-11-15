@@ -149,12 +149,12 @@ Each change gets a section:
 - **What:** the 32 × 32 region map is a window whose minimum corner
   (`Terrain3DData.set_region_window_origin`, default (−16, −16) = stock) the game places.
   A region is drawn when `location − origin` lies in 0..31. Its map entry wraps around:
-  `((loc + 16) & 31)` per axis, so at the default origin the layout is byte-for-byte stock,
-  and moving the window only changes the entries of regions that enter or leave it (no
-  texture upload, no shader or collision rebuild). While streaming, regions can be added
-  at any location up to ±2^19 (`REGION_LOCATION_LIMIT`, so vertex coordinates stay inside
-  int32); resident regions outside the window stay loaded for data queries and collision
-  and are simply not drawn.
+  `((loc + 16) & 31)` per axis, so at the default origin the layout is byte-for-byte stock.
+  Moving the window changes only the entries of regions that enter or leave it (no shader
+  or collision rebuild; since entry 5, regions entering upload their layers). While
+  streaming, regions can be added at any location up to ±2^19 (`REGION_LOCATION_LIMIT`, so
+  vertex coordinates stay inside int32); resident regions outside the window stay loaded
+  for data queries and collision and are not drawn (since entry 5 they hold no GPU slot).
 - **Data queries do not depend on the window.** While streaming, `get_region_id` is the slot
   looked up by location, so `has_region`, `get_normal`, `get_pixel`, `get_control`,
   `get_region_idp` and the CPU region blend answer the same for every window position.
@@ -176,7 +176,7 @@ Each change gets a section:
   the same lookup, and the particle example uploads the origin.
 - **Not changed / known limits:** the editor dummies in `ui.gd` compute stock indices, which
   match at the default window, and the editor never moves it. Instancer meshes of resident
-  regions outside the window still render (they are not windowed). With the FLAT world
+  regions outside the window rendered until entry 5, which removed them. With the FLAT world
   background the GPU treats the window edge like the edge of the world (it blends to the
   background there), while the CPU blend only looks at which regions exist, so heights can
   differ in a strip one region wide at the window edge; the game uses background NONE and
@@ -204,3 +204,38 @@ Each change gets a section:
   `tools/terrain3d_fork/test.py` (game repo) fails a test on any engine `ERROR:` line the
   test does not declare with `## expect-error:`.
 - **Upstream:** none yet. Upstream #491 asks for this; a PR would follow #1004.
+
+### 5. GPU slots only inside the region window
+
+- **What:** while streaming, only resident regions inside the region window hold a slot
+  (texture array layer). A resident region outside the window is CPU data only: it answers
+  every data query and feeds collision, but takes no GPU memory, has no instancer meshes,
+  and `get_region_id` is −1 for it. When the window reaches it, it takes a slot and uploads
+  its three maps (`uploads` in the stats); when the window leaves, the slot returns and its
+  instancer meshes are destroyed. `has_region` / `has_regionp` and `get_normal` use
+  residency while streaming, not the slot. The slot capacity is now the number of regions
+  the game keeps drawn inside the window, not the number resident.
+- **Full pool:** adding never fails for lack of a slot. A region inside the window without
+  a free slot stays data only, is logged as an error once ("Slot pool exhausted … not
+  drawn") and counted in `regions_undrawn`; it takes the next slot that comes free (an
+  eviction or the window moving). The data stays usable and the mistake is visible,
+  instead of refusing the region.
+- **Edits:** `update_maps()` syncs changed resident regions whether drawn or not (entry 3):
+  drawn ones re-upload, data-only ones refresh collision, and their current maps are
+  uploaded whenever they later take a slot.
+- **Why:** in co-op the host keeps physics ground around every remote player
+  (`Management/Planning/terrain_streaming_multiplayer.md` in the game repository) but
+  never draws it. With a slot per resident region, that ground cost about 13 MB of VRAM
+  per region for nothing; six scattered players at 3×3 would need about 1.7 GB on the host.
+- **API changes:** `get_streaming_stats` adds `regions_resident`, `regions_undrawn` and
+  `uploads`; `slots_used` counts drawn regions. `get_region_id` is the GPU layer (−1 when
+  not drawn); use `has_region` for residency.
+- **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d_instancer.cpp` (commit adfe38d).
+- **Test:** `project/tests/test_window_slots.gd`: data-only regions outside the window
+  answer height and normal; an edit made while data only reaches the GPU when the window
+  arrives (readback when windowed); slots return when the window leaves; a full window
+  leaves one region undrawn until an eviction hands it a slot; replacing a data-only
+  region keeps it data only. `test_region_window.gd` checks at every window position that
+  exactly the resident regions inside it hold slots; `test_slot_pool.gd` covers the full
+  pool.
+- **Upstream:** none; belongs with the window change (entry 4).
