@@ -912,6 +912,11 @@ public partial class Terrain3D : Node3D
 		/// Cached name for the 'get_collision_target_position' member.
 		/// </summary>
 		public new static readonly StringName GetCollisionTargetPosition = "get_collision_target_position";
+		// Barge Game addition: several collision targets (BARGE_CHANGES.md entry 6)
+		public new static readonly StringName AddCollisionTarget = "add_collision_target";
+		public new static readonly StringName RemoveCollisionTarget = "remove_collision_target";
+		public new static readonly StringName ClearCollisionTargets = "clear_collision_targets";
+		public new static readonly StringName GetCollisionTargets = "get_collision_targets";
 		/// <summary>
 		/// Cached name for the 'snap' member.
 		/// </summary>
@@ -957,6 +962,19 @@ public partial class Terrain3D : Node3D
 
 	public new Vector3 GetCollisionTargetPosition() => 
 		Call(GDExtensionMethodName.GetCollisionTargetPosition, []).As<Vector3>();
+
+	// Barge Game addition: several collision targets, radius in metres (BARGE_CHANGES.md entry 6)
+	public new void AddCollisionTarget(Node3D node, double radiusM) => 
+		Call(GDExtensionMethodName.AddCollisionTarget, [node, radiusM]);
+
+	public new void RemoveCollisionTarget(Node3D node) => 
+		Call(GDExtensionMethodName.RemoveCollisionTarget, [node]);
+
+	public new void ClearCollisionTargets() => 
+		Call(GDExtensionMethodName.ClearCollisionTargets, []);
+
+	public new Godot.Collections.Array<Node3D> GetCollisionTargets() => 
+		Call(GDExtensionMethodName.GetCollisionTargets, []).As<Godot.Collections.Array<Node3D>>();
 
 	public new void Snap() => 
 		Call(GDExtensionMethodName.Snap, []);

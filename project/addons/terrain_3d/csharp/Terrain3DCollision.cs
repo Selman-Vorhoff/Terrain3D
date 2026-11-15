@@ -177,6 +177,13 @@ public partial class Terrain3DCollision : GodotObject
 		/// Cached name for the 'get_rid' member.
 		/// </summary>
 		public new static readonly StringName GetRid = "get_rid";
+		// Barge Game addition: several collision targets (BARGE_CHANGES.md entry 6)
+		public new static readonly StringName AddTarget = "add_target";
+		public new static readonly StringName RemoveTarget = "remove_target";
+		public new static readonly StringName ClearTargets = "clear_targets";
+		public new static readonly StringName GetTargets = "get_targets";
+		public new static readonly StringName GetTargetRadius = "get_target_radius";
+		public new static readonly StringName GetStats = "get_stats";
 	}
 
 	public new void Build() => 
@@ -199,6 +206,25 @@ public partial class Terrain3DCollision : GodotObject
 
 	public new Rid GetRid() => 
 		Call(GDExtensionMethodName.GetRid, []).As<Rid>();
+
+	// Barge Game addition: several collision targets, radius in metres (BARGE_CHANGES.md entry 6)
+	public new void AddTarget(Node3D node, double radiusM) => 
+		Call(GDExtensionMethodName.AddTarget, [node, radiusM]);
+
+	public new void RemoveTarget(Node3D node) => 
+		Call(GDExtensionMethodName.RemoveTarget, [node]);
+
+	public new void ClearTargets() => 
+		Call(GDExtensionMethodName.ClearTargets, []);
+
+	public new Godot.Collections.Array<Node3D> GetTargets() => 
+		Call(GDExtensionMethodName.GetTargets, []).As<Godot.Collections.Array<Node3D>>();
+
+	public new double GetTargetRadius(Node3D node) => 
+		Call(GDExtensionMethodName.GetTargetRadius, [node]).As<double>();
+
+	public new Godot.Collections.Dictionary GetStats() => 
+		Call(GDExtensionMethodName.GetStats, []).As<Godot.Collections.Dictionary>();
 
 }
 

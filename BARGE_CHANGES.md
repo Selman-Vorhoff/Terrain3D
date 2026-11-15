@@ -300,8 +300,11 @@ Each change gets a section:
   leaves the host-simulated barge with no ground.
 - **Limits:** shapes fill synchronously (entry 8 makes each fill much cheaper);
   `test_collision_targets_perf.gd` logs the cost.
+- **C#:** the addon's wrappers carry the same calls (`Terrain3D.AddCollisionTarget` …,
+  `Terrain3DCollision.AddTarget` …, `GetStats`), as entries 3 and 4 did for `Terrain3DData`.
 - **Files:** `src/terrain_3d_collision.{h,cpp}`, `src/terrain_3d.{h,cpp}` (commit ae48bef,
-  review fixes in the commit after it).
+  review fixes in 015e155); `project/addons/terrain_3d/csharp/Terrain3D.cs`,
+  `Terrain3DCollision.cs`.
 - **Test:** `project/tests/test_collision_targets.gd`: separate targets (shape count from
   the rule), overlapping targets (union, no double count), radius in metres at 0.25 m
   spacing, the stock target ignored while targets exist, teleport and shape reuse, a
@@ -311,6 +314,8 @@ Each change gets a section:
   huge radius), collision following a target with no camera, and (windowed only, as the
   headless renderer has no material uniforms) a neighbour arriving under the world
   background blend refilling the shapes next to it.
+  `project/tests/test_csharp_wrapper_names.gd` checks every method, property and signal
+  name in the C# wrappers against the native classes (stock and fork names alike).
   `project/tests/test_collision_targets_perf.gd` logs fill, step, idle and region flush
   times for the barge plus six players at 0.25 m with 48 m radius and 8 m shapes.
 - **Upstream:** none; a general feature that could be offered upstream with the window.
