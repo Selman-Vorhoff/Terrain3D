@@ -63,8 +63,9 @@ private:
 	HashMap<Vector2i, int> _cell_shapes; // active shape per cell (top left, vertex units)
 	std::vector<int> _free_shapes; // disabled shapes ready for reuse
 	HashSet<Vector2i> _dirty_regions; // regions changed since the last flush
+	HashSet<Vector2i> _dirty_residency; // of those, regions that arrived or left
 	bool _targets_dirty = false;
-	int _dirty_margin = 0; // regions around a dirty region whose shapes refill (see flush)
+	int _dirty_margin = 0; // regions around an arrived/left region whose shapes refill (see flush)
 	static constexpr real_t MAX_TARGET_RADIUS_M = 4096.f;
 	uint64_t _stat_updates = 0;
 	uint64_t _stat_fills = 0;
@@ -104,7 +105,9 @@ public:
 	void update(const Vector2i &p_region_loc = V2I_MAX, const bool p_rebuild = false);
 	void destroy();
 	// Barge Game addition: a streamed region was inserted or evicted
-	void region_changed(const Vector2i &p_region_loc);
+	// p_residency_changed: the region arrived or left (its neighbours' blended heights
+	// change too); false for new data in a resident region.
+	void region_changed(const Vector2i &p_region_loc, const bool p_residency_changed = true);
 	void flush_region_changes();
 	// Barge Game addition: several collision targets, radius in metres.
 	void add_target(Node3D *p_node, const real_t p_radius_m);

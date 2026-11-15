@@ -283,8 +283,10 @@ Each change gets a section:
     and column included) and retries needed cells that had no region. A stationary target
     therefore gains ground when its region streams in and loses it when it is evicted.
     While the world background blends (FLAT or NOISE), heights depend on whether the
-    regions around a vertex are resident, so shapes one region out refill too (also
-    widens the stock single-target refresh test by one region).
+    regions around a vertex are resident, so when a region arrives or leaves, shapes one
+    region out refill too; new data for a resident region (replacement, edit sync) refills
+    only its own shapes. The stock single-target refresh test widens by one region the
+    same way.
   - Collision keeps following registered targets when Terrain3D finds no camera and no
     clipmap target (stock stops physics processing then); only the clipmap stops.
   - Radii must be finite, above 0 and at most 4096 m.
@@ -296,8 +298,8 @@ Each change gets a section:
   (`Management/Planning/terrain_streaming_multiplayer.md` in the game repository).
   Stock follows one node, so a host player walking more than the radius from the barge
   leaves the host-simulated barge with no ground.
-- **Limits:** shapes fill synchronously, at the stock per-shape cost;
-  `test_collision_targets_perf.gd` logs it.
+- **Limits:** shapes fill synchronously (entry 8 makes each fill much cheaper);
+  `test_collision_targets_perf.gd` logs the cost.
 - **Files:** `src/terrain_3d_collision.{h,cpp}`, `src/terrain_3d.{h,cpp}` (commit ae48bef,
   review fixes in the commit after it).
 - **Test:** `project/tests/test_collision_targets.gd`: separate targets (shape count from
@@ -326,3 +328,37 @@ Each change gets a section:
   laptop loads it with the Linux build.
 - **Upstream:** none (game packaging). Bump the `-barge.N` suffix with each install that
   changes behaviour.
+
+### 8. Collision shapes filled from the region maps in blocks
+
+- **What:** `Terrain3DData::get_modified_heights(vgrid, size, out)` returns
+  `get_modified_height()` for a square block of vertices, and collision fills each shape
+  (dynamic, several targets and full) from it. It gives the same heights, bit for bit:
+  - the height and control maps are read through their image pointers (FORMAT_RF, checked;
+    any other format falls back to the single read);
+  - the material settings (world background, ground level, region blend) are read once
+    per block, not by name for every vertex;
+  - the world background blend runs per column and per row (its weights and sampled
+    regions depend on x alone or on z alone), with the same float operations in the same
+    order, and residency is looked up once per region around the block.
+  `get_region_blend()` and the single `get_modified_height()` are unchanged.
+- **Also:** `Terrain3DCollision::region_changed()` takes whether the region arrived or left.
+  Only then do neighbouring shapes refill for the blend (entry 6); new data in a resident
+  region refills only its own shapes.
+- **Why:** collision fill cost the stock read path about 0.3 ms per 33 x 33 shape with the
+  blend on (measured in the Codex review of entry 6: 1.27 s for the barge plus six
+  players, 42 ms for one player stepping one shape), which would stall physics in co-op.
+  `test_collision_targets_perf.gd` (Windows debug build, real renderer, blend on):
+  - all seven targets (784 shapes): 1.27 s → 40 ms;
+  - one target stepping one shape (12 shapes): 42 ms → 1.0 ms;
+  - region under a target replaced (112 shapes, including about 20 ms for the region
+    insert itself): 416 ms → 30 ms.
+  What is left is mostly the physics server building each heightmap shape.
+- **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d_collision.{h,cpp}`.
+- **Test:** `project/tests/test_collision_fill.gd` reads every vertex of every placed shape
+  back from the physics server and compares it bit for bit with `get_surface_height()`.
+  It covers random heights with holes over regions with a gap and the blend on (windowed:
+  it checks the blend changed vertices), a gap filled and a region replaced (region
+  flushes), the blend off, and the stock single target. `test_collision_targets_perf.gd`
+  logs the times.
+- **Upstream:** could be offered: it is a pure speed-up of the stock collision path.

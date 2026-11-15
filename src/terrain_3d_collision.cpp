@@ -36,6 +36,10 @@ Dictionary Terrain3DCollision::_get_shape_data(const Vector2i &p_position, const
 	map_data.resize(hshape_size * hshape_size);
 	real_t min_height = FLT_MAX;
 	real_t max_height = -FLT_MAX;
+	// Barge Game: read the whole block at once (same heights as get_modified_height()).
+	thread_local std::vector<real_t> block;
+	block.resize(hshape_size * hshape_size);
+	data->get_modified_heights(p_position, hshape_size, block.data());
 
 	for (int z = 0; z < hshape_size; z++) {
 		for (int x = 0; x < hshape_size; x++) {
@@ -45,7 +49,7 @@ Dictionary Terrain3DCollision::_get_shape_data(const Vector2i &p_position, const
 			// int index = z * hshape_size + x;
 			// Array Index Rotated Y=-90 - must rotate shape Y=+90 (xform below)
 			int index = hshape_size - 1 - z + x * hshape_size;
-			real_t height = data->get_modified_height(p_position + Vector2i(x, z));
+			real_t height = block[z * hshape_size + x];
 			map_data[index] = height;
 			if (!std::isnan(height)) {
 				min_height = MIN(min_height, height);
@@ -204,20 +208,22 @@ bool Terrain3DCollision::_fill_cell(const int p_shape_id, const Vector2i &p_cell
 }
 
 // True if the cell's samples (its vertices plus the far border row and column) read a
-// region changed since the last flush, or a region next to them while the world
-// background blends (_dirty_margin, set by the flush).
+// region changed since the last flush, or a region next to them arrived or left while
+// the world background blends (_dirty_margin, set by the flush).
 bool Terrain3DCollision::_cell_touches_dirty(const Vector2i &p_cell) const {
 	if (_dirty_regions.is_empty()) {
 		return false;
 	}
 	int region_size = _terrain->get_region_size();
-	const Vector2i margin = Vector2i(_dirty_margin, _dirty_margin);
-	Vector2i lo = V2I_DIVIDE_FLOOR(p_cell, region_size) - margin;
+	const Vector2i lo = V2I_DIVIDE_FLOOR(p_cell, region_size);
 	const Vector2i far_corner = p_cell + Vector2i(int(_shape_size), int(_shape_size));
-	Vector2i hi = V2I_DIVIDE_FLOOR(far_corner, region_size) + margin;
-	for (int y = lo.y; y <= hi.y; y++) {
-		for (int x = lo.x; x <= hi.x; x++) {
-			if (_dirty_regions.has(Vector2i(x, y))) {
+	const Vector2i hi = V2I_DIVIDE_FLOOR(far_corner, region_size);
+	const int m = _dirty_residency.is_empty() ? 0 : _dirty_margin;
+	for (int y = lo.y - m; y <= hi.y + m; y++) {
+		for (int x = lo.x - m; x <= hi.x + m; x++) {
+			const Vector2i loc(x, y);
+			const bool own = x >= lo.x && x <= hi.x && y >= lo.y && y <= hi.y;
+			if (own ? _dirty_regions.has(loc) : _dirty_residency.has(loc)) {
 				return true;
 			}
 		}
@@ -599,7 +605,7 @@ void Terrain3DCollision::update(const Vector2i &p_region_loc, const bool p_rebui
 // there are refilled by flush_region_changes(). Full collision is rebuilt, which is costly
 // and only meant for small streamed worlds. Ported from the collision refresh in upstream
 // draft PR #1004's streamer.
-void Terrain3DCollision::region_changed(const Vector2i &p_region_loc) {
+void Terrain3DCollision::region_changed(const Vector2i &p_region_loc, const bool p_residency_changed) {
 	if (!_initialized || !is_enabled() || _terrain == nullptr) {
 		return;
 	}
@@ -611,6 +617,9 @@ void Terrain3DCollision::region_changed(const Vector2i &p_region_loc) {
 		// Several targets: remember the region; the flush refills only shapes that read it
 		// and retries needed cells that had no region, so a far region costs lookups only.
 		_dirty_regions.insert(p_region_loc);
+		if (p_residency_changed) {
+			_dirty_residency.insert(p_region_loc);
+		}
 		_region_refresh_pending = true;
 		return;
 	}
@@ -628,7 +637,8 @@ void Terrain3DCollision::region_changed(const Vector2i &p_region_loc) {
 	// collision over an evicted region.
 	// Barge Game: plus one region while the world background blends, as residency there
 	// changes heights here (_blend_margin_regions()).
-	real_t reach = real_t(_radius) + 2.0 * real_t(_shape_size) + 2.0 + real_t(_blend_margin_regions()) * region_size;
+	const int margin = p_residency_changed ? _blend_margin_regions() : 0;
+	real_t reach = real_t(_radius) + 2.0 * real_t(_shape_size) + 2.0 + real_t(margin) * region_size;
 	Vector2 d = (nearest - t).abs();
 	if (MAX(d.x, d.y) <= reach) {
 		_region_refresh_pending = true;
@@ -650,6 +660,7 @@ void Terrain3DCollision::flush_region_changes() {
 		}
 	}
 	_dirty_regions.clear();
+	_dirty_residency.clear();
 }
 
 void Terrain3DCollision::add_target(Node3D *p_node, const real_t p_radius_m) {

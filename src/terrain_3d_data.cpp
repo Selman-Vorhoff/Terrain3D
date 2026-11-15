@@ -697,6 +697,7 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 		}
 	}
 	p_region->set_deleted(false);
+	const bool newly_resident = !_regions.has(loc);
 	_regions[loc] = p_region;
 	if (!_region_locations.has(loc)) {
 		_region_locations.push_back(loc);
@@ -720,7 +721,7 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 		}
 	}
 	if (_terrain->get_collision() != nullptr) {
-		_terrain->get_collision()->region_changed(loc);
+		_terrain->get_collision()->region_changed(loc, newly_resident);
 	}
 	_pool_signals_pending = true;
 	if (p_update) {
@@ -754,7 +755,7 @@ Error Terrain3DData::evict_region(const Vector2i &p_region_loc, const bool p_upd
 	}
 	_pool_evictions++;
 	if (_terrain->get_collision() != nullptr) {
-		_terrain->get_collision()->region_changed(p_region_loc);
+		_terrain->get_collision()->region_changed(p_region_loc, true);
 	}
 	if (had_slot) {
 		_pool_fill_undrawn(); // a slot came free; give it to a region waiting in the window
@@ -970,7 +971,7 @@ void Terrain3DData::_pool_sync_data(const Vector2i &p_loc, Terrain3DRegion *p_re
 	p_region->set_edited(false);
 	_pool_dirty.erase(p_loc);
 	if (_terrain->get_collision() != nullptr) {
-		_terrain->get_collision()->region_changed(p_loc);
+		_terrain->get_collision()->region_changed(p_loc, false);
 	}
 	_pool_signals_pending = true;
 }
@@ -1323,6 +1324,148 @@ real_t Terrain3DData::get_modified_height(const Vector2i &p_vgrid) const {
 		}
 	}
 	return height;
+}
+
+// Barge Game addition. get_modified_height() for every vertex of the p_size x p_size block
+// whose top left is p_vgrid, row by row (r_heights[z * p_size + x]), with the same results.
+// Collision fills each shape from this. The single read costs two engine calls (Image
+// get_pixel) per map, two material property lookups by name, four residency lookups and
+// two exp/log pairs per vertex; here the maps are read through their pointers, the material
+// settings once per block, and the blend per column and row (see below).
+void Terrain3DData::get_modified_heights(const Vector2i &p_vgrid, const int p_size, real_t *r_heights) const {
+	if (p_size <= 0 || r_heights == nullptr) {
+		return;
+	}
+	// Material settings, as get_modified_height() reads them.
+	bool blend = false;
+	real_t ground_level = 0.f;
+	real_t region_blend = 0.f;
+	const Ref<Terrain3DMaterial> material = _terrain->get_material();
+	if (material.is_valid()) {
+		const Terrain3DMaterial::WorldBackground bg_mode = material->get_world_background();
+		if (bg_mode == Terrain3DMaterial::WorldBackground::FLAT || bg_mode == Terrain3DMaterial::WorldBackground::NOISE) {
+			Variant var_gl = material->get("ground_level");
+			Variant var_rb = material->get("region_blend");
+			if (var_gl.get_type() != Variant::NIL && var_rb.get_type() != Variant::NIL) {
+				blend = true;
+				ground_level = var_gl;
+				region_blend = var_rb;
+			}
+		}
+	}
+	const int region_size = _region_size;
+	const real_t region_texel_size = 1.f / real_t(region_size);
+
+	// The blend (get_region_blend()) works on each uv2 component on its own: the weights
+	// and the region columns/rows it samples depend on x alone or on z alone. So they are
+	// worked out once per column and once per row here, with the same float operations in
+	// the same order, and only the final lerps run per vertex. Residency is looked up once
+	// per region around the block.
+	struct BlendAxis {
+		real_t w = 0.f; // sigmoid weight
+		int lo = 0; // floor(uv2 + 0)
+		int hi = 0; // floor(uv2 + 1)
+	};
+	std::vector<BlendAxis> blend_x;
+	std::vector<BlendAxis> blend_z;
+	Vector2i first;
+	Vector2i span;
+	std::vector<uint8_t> resident;
+	if (blend) {
+		const real_t blend_factor = 2.0f + 126.0f * (1.0f - region_blend);
+		auto axis = [&](const int p_vertex) -> BlendAxis {
+			BlendAxis a;
+			const real_t uv = real_t(p_vertex) * region_texel_size - 0.5011f; // bias must match shader
+			a.lo = int(Math::floor(uv + 0.0f));
+			a.hi = int(Math::floor(uv + 1.0f));
+			real_t f = uv - Math::floor(uv);
+			f = Math::clamp(f, real_t(1e-8f), real_t(1.0f - 1e-8f));
+			a.w = 1.f / (1.f + Math::exp(blend_factor * Math::log((1.f - f) / f)));
+			return a;
+		};
+		blend_x.resize(p_size);
+		blend_z.resize(p_size);
+		for (int i = 0; i < p_size; i++) {
+			blend_x[i] = axis(p_vgrid.x + i);
+			blend_z[i] = axis(p_vgrid.y + i);
+		}
+		first = Vector2i(MIN(blend_x[0].lo, blend_x[0].hi), MIN(blend_z[0].lo, blend_z[0].hi));
+		const Vector2i last(MAX(blend_x[p_size - 1].lo, blend_x[p_size - 1].hi), MAX(blend_z[p_size - 1].lo, blend_z[p_size - 1].hi));
+		span = last - first + Vector2i(1, 1);
+		resident.resize(span.x * span.y);
+		for (int y = 0; y < span.y; y++) {
+			for (int x = 0; x < span.x; x++) {
+				resident[y * span.x + x] = has_region(first + Vector2i(x, y)) ? 1 : 0;
+			}
+		}
+	}
+	auto resident_at = [&](const int p_x, const int p_z) -> real_t {
+		const int rx = p_x - first.x;
+		const int rz = p_z - first.y;
+		if (rx >= 0 && rz >= 0 && rx < span.x && rz < span.y) {
+			return resident[rz * span.x + rx] ? 1.f : 0.f;
+		}
+		return has_region(Vector2i(p_x, p_z)) ? 1.f : 0.f;
+	};
+
+	Vector2i cached_loc = V2I_MAX;
+	const float *heights = nullptr; // FORMAT_RF, region_size squared
+	const float *controls = nullptr;
+	bool missing = false; // no resident region: NaN, as get_pixel_descaled() returns
+	bool slow = false; // unexpected map format: use the single read
+	for (int z = 0; z < p_size; z++) {
+		for (int x = 0; x < p_size; x++) {
+			const Vector2i vgrid = p_vgrid + Vector2i(x, z);
+			const Vector2i loc = V2I_DIVIDE_FLOOR(vgrid, region_size);
+			if (loc != cached_loc) {
+				cached_loc = loc;
+				heights = nullptr;
+				controls = nullptr;
+				missing = false;
+				slow = false;
+				const Terrain3DRegion *region = get_region_ptr(loc);
+				if (!region || region->is_deleted()) {
+					missing = true;
+				} else {
+					Image *hmap = region->get_map_ptr(TYPE_HEIGHT);
+					Image *cmap = region->get_map_ptr(TYPE_CONTROL);
+					if (hmap && cmap && hmap->get_format() == Image::FORMAT_RF && cmap->get_format() == Image::FORMAT_RF &&
+							hmap->get_width() == region_size && hmap->get_height() == region_size &&
+							cmap->get_width() == region_size && cmap->get_height() == region_size) {
+						heights = reinterpret_cast<const float *>(hmap->ptr());
+						controls = reinterpret_cast<const float *>(cmap->ptr());
+					}
+					slow = heights == nullptr || controls == nullptr;
+				}
+			}
+			real_t &out = r_heights[z * p_size + x];
+			if (slow) {
+				out = get_modified_height(vgrid);
+				continue;
+			}
+			if (missing) {
+				out = NAN;
+				continue;
+			}
+			const int index = (vgrid.y - loc.y * region_size) * region_size + (vgrid.x - loc.x * region_size);
+			if (is_hole(controls[index])) {
+				out = NAN;
+				continue;
+			}
+			real_t height = heights[index];
+			if (blend) {
+				const BlendAxis &bx = blend_x[x];
+				const BlendAxis &bz = blend_z[z];
+				const real_t a = resident_at(bx.lo, bz.hi);
+				const real_t b = resident_at(bx.hi, bz.hi);
+				const real_t c = resident_at(bx.hi, bz.lo);
+				const real_t d = resident_at(bx.lo, bz.lo);
+				const real_t mix = Math::lerp(Math::lerp(d, c, bx.w), Math::lerp(a, b, bx.w), bz.w);
+				height = Math::lerp(height, ground_level, smoothstep(0.f, 1.f, (1.f - mix) * 2.f));
+			}
+			out = height;
+		}
+	}
 }
 
 real_t Terrain3DData::get_region_blend(const Vector2 &p_uv2) const {

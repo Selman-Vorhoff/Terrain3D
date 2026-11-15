@@ -235,6 +235,8 @@ public:
 	real_t get_height(const Vector3 &p_global_position) const;
 	real_t get_surface_height(const Vector3 &p_global_position) const;
 	real_t get_modified_height(const Vector2i &p_vgrid) const;
+	// Barge Game addition: get_modified_height() for a square block of vertices
+	void get_modified_heights(const Vector2i &p_vgrid, const int p_size, real_t *r_heights) const;
 	real_t get_region_blend(const Vector2 &p_uv2) const;
 	Vector3 get_normal(const Vector3 &p_global_position) const;
 	bool is_in_slope(const Vector3 &p_global_position, const Vector2 &p_slope_range, const Vector3 &p_normal = V3_ZERO) const;
