@@ -18,8 +18,11 @@ against stock.
 - **Stock check:** the game keeps the stock release binaries and a switch script
   (`tools/terrain3d_fork/` in the game repository), so any bug can be checked against
   stock with a world that stock can load.
-- **Upstream absorbs a change:** mark the entry "merged upstream" and drop our version
-  at the next merge.
+- **Upstream absorbs a change:** compare upstream's version with every behaviour the
+  entry lists, our fixes included. Drop our version at the next merge only when all are
+  covered and the fork tests plus the game checks pass on Windows and Linux; otherwise
+  keep the missing parts as a smaller entry. Mark the entry "merged upstream" with what
+  replaced what.
 
 `git diff v1.1.0-stable..barge/1.1` shows everything we changed.
 
