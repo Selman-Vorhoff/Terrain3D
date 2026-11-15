@@ -145,6 +145,21 @@ int Terrain3DCollision::_shape_count() const {
 	return _static_body_rid.is_valid() ? PS->body_get_shape_count(_static_body_rid) : 0;
 }
 
+// Regions a changed region can affect beyond its own vertices. With the world background
+// blending towards the ground level, a vertex's height depends on whether the regions
+// around it are resident (get_region_blend() samples one region out), so a region arriving
+// or leaving changes the heights in its neighbours too.
+int Terrain3DCollision::_blend_margin_regions() const {
+	const Ref<Terrain3DMaterial> material = _terrain->get_material();
+	if (material.is_valid()) {
+		const Terrain3DMaterial::WorldBackground bg = material->get_world_background();
+		if (bg == Terrain3DMaterial::WorldBackground::FLAT || bg == Terrain3DMaterial::WorldBackground::NOISE) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 // Adds one disabled shape to the body, as build() does, and returns its id.
 int Terrain3DCollision::_shape_create() {
 	int hshape_size = _shape_size + 1;
@@ -189,15 +204,17 @@ bool Terrain3DCollision::_fill_cell(const int p_shape_id, const Vector2i &p_cell
 }
 
 // True if the cell's samples (its vertices plus the far border row and column) read a
-// region changed since the last flush.
+// region changed since the last flush, or a region next to them while the world
+// background blends (_dirty_margin, set by the flush).
 bool Terrain3DCollision::_cell_touches_dirty(const Vector2i &p_cell) const {
 	if (_dirty_regions.is_empty()) {
 		return false;
 	}
 	int region_size = _terrain->get_region_size();
-	Vector2i lo = V2I_DIVIDE_FLOOR(p_cell, region_size);
+	const Vector2i margin = Vector2i(_dirty_margin, _dirty_margin);
+	Vector2i lo = V2I_DIVIDE_FLOOR(p_cell, region_size) - margin;
 	const Vector2i far_corner = p_cell + Vector2i(int(_shape_size), int(_shape_size));
-	Vector2i hi = V2I_DIVIDE_FLOOR(far_corner, region_size);
+	Vector2i hi = V2I_DIVIDE_FLOOR(far_corner, region_size) + margin;
 	for (int y = lo.y; y <= hi.y; y++) {
 		for (int x = lo.x; x <= hi.x; x++) {
 			if (_dirty_regions.has(Vector2i(x, y))) {
@@ -609,7 +626,9 @@ void Terrain3DCollision::region_changed(const Vector2i &p_region_loc) {
 	// grid (up to one shape away), reach one shape size out and sample one border vertex
 	// past their edge. A false positive costs an in-place refresh; a miss leaves stale
 	// collision over an evicted region.
-	real_t reach = real_t(_radius) + 2.0 * real_t(_shape_size) + 2.0;
+	// Barge Game: plus one region while the world background blends, as residency there
+	// changes heights here (_blend_margin_regions()).
+	real_t reach = real_t(_radius) + 2.0 * real_t(_shape_size) + 2.0 + real_t(_blend_margin_regions()) * region_size;
 	Vector2 d = (nearest - t).abs();
 	if (MAX(d.x, d.y) <= reach) {
 		_region_refresh_pending = true;
@@ -624,6 +643,7 @@ void Terrain3DCollision::flush_region_changes() {
 	} else if (_region_refresh_pending) {
 		_region_refresh_pending = false;
 		if (_initialized && is_dynamic_mode() && _uses_targets()) {
+			_dirty_margin = _blend_margin_regions();
 			_update_targets(false, true);
 		} else {
 			update(V2I_MAX, true);
@@ -637,8 +657,12 @@ void Terrain3DCollision::add_target(Node3D *p_node, const real_t p_radius_m) {
 		LOG(ERROR, "Collision target is null");
 		return;
 	}
-	if (!(p_radius_m > 0.f)) {
-		LOG(ERROR, "Collision target radius must be above 0 m, got ", p_radius_m);
+	if (!Math::is_finite(p_radius_m) || p_radius_m <= 0.f) {
+		LOG(ERROR, "Collision target radius must be above 0 m and finite, got ", p_radius_m);
+		return;
+	}
+	if (p_radius_m > MAX_TARGET_RADIUS_M) {
+		LOG(ERROR, "Collision target radius ", p_radius_m, " m is above the ", MAX_TARGET_RADIUS_M, " m limit");
 		return;
 	}
 	for (Target &t : _targets) {
@@ -655,6 +679,9 @@ void Terrain3DCollision::add_target(Node3D *p_node, const real_t p_radius_m) {
 	t.radius_m = p_radius_m;
 	_targets.push_back(t);
 	_targets_dirty = true;
+	if (_terrain != nullptr) {
+		_terrain->set_physics_process(true); // targets are followed in Terrain3D's physics process
+	}
 	LOG(INFO, "Collision target added: ", p_node, ", radius ", p_radius_m, " m, targets: ", _targets.size());
 	if (first && _initialized && is_dynamic_mode()) {
 		build(); // leave the stock grid for on-demand shapes

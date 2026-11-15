@@ -8,6 +8,9 @@ extends SceneTree
 ## Exits with the number of failed checks (0 = pass).
 ## expect-error: Collision target is null
 ## expect-error: Collision target radius must be above 0 m
+## expect-error: m limit
+## The world background blend check needs material uniforms, which only a real renderer
+## has: tools/terrain3d_fork/test.py --windowed collision_targets
 
 const RS := 128 # vertices per region side
 const SPACING := 0.25 # m per vertex: 32 m regions
@@ -107,6 +110,8 @@ func _run() -> void:
 	await _frames()
 	_t.change_region_size(RS)
 	_t.vertex_spacing = SPACING
+	# Heights exactly as stored; the blend towards the ground level is checked on its own below.
+	_t.material.world_background = Terrain3DMaterial.NONE
 	var d: Terrain3DData = _t.data
 	d.enable_streaming(8)
 	for loc in [a_loc, b_loc, d_loc]:
@@ -208,6 +213,50 @@ func _run() -> void:
 	_t.add_collision_target(null, 5.0)
 	_t.add_collision_target(ta, 0.0)
 	ok(_t.get_collision_targets().is_empty(), "null node and zero radius refused")
+	_t.add_collision_target(ta, RADIUS_M)
+	_t.add_collision_target(ta, INF)
+	_t.add_collision_target(ta, NAN)
+	_t.add_collision_target(ta, 1.0e6)
+	ok(is_equal_approx(_t.collision.get_target_radius(ta), RADIUS_M), "infinite, NaN and huge radii refused, radius kept")
+	await _frames()
+	ok(is_equal_approx(_ray(a + Vector3(1, 0, 1)), 10.0), "ground kept after the refused radii")
+
+	# World background blend: a neighbour arriving changes heights near the shared edge
+	# (the blend reads residency one region out), so those shapes refill too.
+	if DisplayServer.get_name() != "headless":
+		_t.material.world_background = Terrain3DMaterial.FLAT
+		_t.material.set("region_blend", 1.0)
+		var e_loc := Vector2i(580, 500)
+		ok(d.add_region(_region(e_loc, 10.0)) == OK, "add %s for the blend check" % e_loc)
+		var te := _node_at(_at(e_loc, 26.0, 16.0))
+		_t.add_collision_target(te, RADIUS_M)
+		await _frames()
+		var p := _at(e_loc, 26.3, 16.3)
+		var before := _ray(p)
+		ok(d.add_region(_region(e_loc + Vector2i(1, 0), 10.0)) == OK, "stream in the eastern neighbour")
+		await _frames()
+		var after := _ray(p)
+		_t.collision.update(Vector2i(2147483647, 2147483647), true)
+		var refilled := _ray(p)
+		ok(not is_equal_approx(before, refilled), "the neighbour changes the blended height (%s -> %s)" % [before, refilled])
+		ok(is_equal_approx(after, refilled), "shapes next to the new neighbour refilled (%s, full refill %s)" % [after, refilled])
+		_t.remove_collision_target(te)
+		_t.material.world_background = Terrain3DMaterial.NONE
+	else:
+		print("NOTE: headless, world background blend check skipped (no material uniforms)")
+	_t.remove_collision_target(ta)
+
+	# Without any camera, collision still follows its targets.
+	cam.free()
+	_t.clear_collision_targets()
+	var tn := _node_at(a)
+	_t.add_collision_target(tn, RADIUS_M)
+	await _frames()
+	tn.global_position = b
+	await _frames(5)
+	ok(is_equal_approx(_ray(b + Vector3(1, 0, 1)), 30.0), "no camera: the target moved and has ground (%s)" % _ray(b + Vector3(1, 0, 1)))
+	ok(is_nan(_ray(a + Vector3(1, 0, 1))), "no camera: its old ground released")
+	_t.clear_collision_targets()
 
 	print("STATS final %s" % _stats())
 	_t.free()

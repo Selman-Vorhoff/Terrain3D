@@ -167,6 +167,12 @@ void Terrain3D::_grab_camera() {
 		LOG(DEBUG, "Grabbing the in-game viewport camera: ", _camera.get_target());
 	}
 	if (!_camera.is_valid() && !_clipmap_target.is_valid()) {
+		// Barge Game: collision targets still need physics processing without a camera
+		// (a server, a respawn or a scene change); only the clipmap stops following.
+		if (_collision && _collision->is_dynamic_mode() && _collision->has_targets()) {
+			LOG(DEBUG, "No clipmap target or camera; collision keeps following its targets");
+			return;
+		}
 		set_physics_process(false); // No target to follow, disable snapping until one set
 		LOG(ERROR, "Cannot find clipmap target or active camera. LODs won't be updated. Set manually with set_clipmap_target() or set_camera()");
 	}

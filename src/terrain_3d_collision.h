@@ -64,6 +64,8 @@ private:
 	std::vector<int> _free_shapes; // disabled shapes ready for reuse
 	HashSet<Vector2i> _dirty_regions; // regions changed since the last flush
 	bool _targets_dirty = false;
+	int _dirty_margin = 0; // regions around a dirty region whose shapes refill (see flush)
+	static constexpr real_t MAX_TARGET_RADIUS_M = 4096.f;
 	uint64_t _stat_updates = 0;
 	uint64_t _stat_fills = 0;
 	uint64_t _stat_update_usec_last = 0;
@@ -71,6 +73,7 @@ private:
 	uint64_t _stat_update_usec_total = 0;
 
 	bool _uses_targets() const { return !_targets.empty(); }
+	int _blend_margin_regions() const;
 	int _shape_create();
 	int _shape_count() const;
 	bool _fill_cell(const int p_shape_id, const Vector2i &p_cell);
@@ -105,6 +108,7 @@ public:
 	void flush_region_changes();
 	// Barge Game addition: several collision targets, radius in metres.
 	void add_target(Node3D *p_node, const real_t p_radius_m);
+	bool has_targets() const { return !_targets.empty(); }
 	void remove_target(Node3D *p_node);
 	void clear_targets();
 	TypedArray<Node3D> get_targets() const;

@@ -282,6 +282,12 @@ Each change gets a section:
     remembered; the flush refills only the shapes whose samples read it (their border row
     and column included) and retries needed cells that had no region. A stationary target
     therefore gains ground when its region streams in and loses it when it is evicted.
+    While the world background blends (FLAT or NOISE), heights depend on whether the
+    regions around a vertex are resident, so shapes one region out refill too (also
+    widens the stock single-target refresh test by one region).
+  - Collision keeps following registered targets when Terrain3D finds no camera and no
+    clipmap target (stock stops physics processing then); only the clipmap stops.
+  - Radii must be finite, above 0 and at most 4096 m.
   - Full collision modes ignore the targets.
 - **Stats:** `Terrain3DCollision.get_stats()`: `targets`, `shapes_total`, `shapes_active`,
   `shapes_free`, `updates`, `fills`, `update_usec_last/max/mean` (target updates only).
@@ -290,16 +296,19 @@ Each change gets a section:
   (`Management/Planning/terrain_streaming_multiplayer.md` in the game repository).
   Stock follows one node, so a host player walking more than the radius from the barge
   leaves the host-simulated barge with no ground.
-- **Limits:** Terrain3D stops physics processing when it finds no camera and no clipmap
-  target (stock), and collision then stops following targets. Shape fill cost is the stock
-  per-shape cost; `test_collision_targets_perf.gd` logs it.
-- **Files:** `src/terrain_3d_collision.{h,cpp}`, `src/terrain_3d.{h,cpp}`.
+- **Limits:** shapes fill synchronously, at the stock per-shape cost;
+  `test_collision_targets_perf.gd` logs it.
+- **Files:** `src/terrain_3d_collision.{h,cpp}`, `src/terrain_3d.{h,cpp}` (commit ae48bef,
+  review fixes in the commit after it).
 - **Test:** `project/tests/test_collision_targets.gd`: separate targets (shape count from
   the rule), overlapping targets (union, no double count), radius in metres at 0.25 m
   spacing, the stock target ignored while targets exist, teleport and shape reuse, a
   stationary target gaining a streamed region, losing it on eviction and getting the
   replacement, the border samples refilled when the neighbour arrives, a freed target, the
-  last target removed (stock target again), bad input refused.
+  last target removed (stock target again), bad input refused (null, zero, infinite, NaN,
+  huge radius), collision following a target with no camera, and (windowed only, as the
+  headless renderer has no material uniforms) a neighbour arriving under the world
+  background blend refilling the shapes next to it.
   `project/tests/test_collision_targets_perf.gd` logs fill, step, idle and region flush
   times for the barge plus six players at 0.25 m with 48 m radius and 8 m shapes.
 - **Upstream:** none; a general feature that could be offered upstream with the window.
