@@ -307,6 +307,18 @@ public partial class Terrain3DData : GodotObject
 		/// Cached name for the 'get_region_map_index' member.
 		/// </summary>
 		public new static readonly StringName GetRegionMapIndex = "get_region_map_index";
+		// Barge Game addition: region window and slot pool streaming
+		public new static readonly StringName SetRegionWindowOrigin = "set_region_window_origin";
+		public new static readonly StringName GetRegionWindowOrigin = "get_region_window_origin";
+		public new static readonly StringName IsInRegionWindow = "is_in_region_window";
+		public new static readonly StringName EnableStreaming = "enable_streaming";
+		public new static readonly StringName IsStreaming = "is_streaming";
+		public new static readonly StringName GetSlotCapacity = "get_slot_capacity";
+		public new static readonly StringName GetFreeSlotCount = "get_free_slot_count";
+		public new static readonly StringName AddRegionStreamed = "add_region_streamed";
+		public new static readonly StringName EvictRegion = "evict_region";
+		public new static readonly StringName GetShaderRegionLocations = "get_shader_region_locations";
+		public new static readonly StringName GetStreamingStats = "get_streaming_stats";
 		/// <summary>
 		/// Cached name for the 'do_for_regions' member.
 		/// </summary>
@@ -593,8 +605,44 @@ public partial class Terrain3DData : GodotObject
 	public new int[] GetRegionMap() => 
 		Call(GDExtensionMethodName.GetRegionMap, []).As<int[]>();
 
-	public new static long GetRegionMapIndex(Vector2I regionLocation) => 
-		ClassDB.ClassCallStatic(NativeName, GDExtensionMethodName.GetRegionMapIndex, [regionLocation]).As<long>();
+	// Barge Game: an instance method now, because the index depends on the region window.
+	public new long GetRegionMapIndex(Vector2I regionLocation) => 
+		Call(GDExtensionMethodName.GetRegionMapIndex, [regionLocation]).As<long>();
+
+	// Barge Game addition: region window (BARGE_CHANGES.md entry 4)
+	public new void SetRegionWindowOrigin(Vector2I origin) => 
+		Call(GDExtensionMethodName.SetRegionWindowOrigin, [origin]);
+
+	public new Vector2I GetRegionWindowOrigin() => 
+		Call(GDExtensionMethodName.GetRegionWindowOrigin, []).As<Vector2I>();
+
+	public new bool IsInRegionWindow(Vector2I regionLocation) => 
+		Call(GDExtensionMethodName.IsInRegionWindow, [regionLocation]).As<bool>();
+
+	// Barge Game addition: slot pool streaming (BARGE_CHANGES.md entry 3)
+	public new void EnableStreaming(long slotCapacity) => 
+		Call(GDExtensionMethodName.EnableStreaming, [slotCapacity]);
+
+	public new bool IsStreaming() => 
+		Call(GDExtensionMethodName.IsStreaming, []).As<bool>();
+
+	public new long GetSlotCapacity() => 
+		Call(GDExtensionMethodName.GetSlotCapacity, []).As<long>();
+
+	public new long GetFreeSlotCount() => 
+		Call(GDExtensionMethodName.GetFreeSlotCount, []).As<long>();
+
+	public new Error AddRegionStreamed(Terrain3DRegion region, bool update = true) => 
+		Call(GDExtensionMethodName.AddRegionStreamed, [region, update]).As<Error>();
+
+	public new Error EvictRegion(Vector2I regionLocation, bool update = true) => 
+		Call(GDExtensionMethodName.EvictRegion, [regionLocation, update]).As<Error>();
+
+	public new Godot.Collections.Array GetShaderRegionLocations() => 
+		Call(GDExtensionMethodName.GetShaderRegionLocations, []).As<Godot.Collections.Array>();
+
+	public new Godot.Collections.Dictionary GetStreamingStats() => 
+		Call(GDExtensionMethodName.GetStreamingStats, []).As<Godot.Collections.Dictionary>();
 
 	public new void DoForRegions(Rect2I area, Callable callback) => 
 		Call(GDExtensionMethodName.DoForRegions, [area, callback]);

@@ -787,8 +787,10 @@ void Terrain3DData::set_region_window_origin(const Vector2i &p_origin) {
 		return;
 	}
 	ERR_FAIL_COND_MSG(!_streaming, "The region window can only move while streaming (enable_streaming)");
+	// The window's last region is origin + 31; check it in 64 bit so it cannot overflow.
 	ERR_FAIL_COND_MSG(!is_valid_region_location(p_origin) ||
-					!is_valid_region_location(p_origin + REGION_MAP_VSIZE),
+					int64_t(p_origin.x) + REGION_MAP_SIZE - 1 > REGION_LOCATION_LIMIT ||
+					int64_t(p_origin.y) + REGION_MAP_SIZE - 1 > REGION_LOCATION_LIMIT,
 			vformat("Region window origin %s is beyond +-%d", p_origin, REGION_LOCATION_LIMIT));
 	_region_window_origin = p_origin;
 	_region_map.fill(0);
@@ -1297,6 +1299,10 @@ void Terrain3DData::calc_height_range(const bool p_recursive) {
  */
 void Terrain3DData::import_images(const TypedArray<Image> &p_images, const Vector3 &p_global_position, const real_t p_offset, const real_t p_scale) {
 	IS_INIT_MESG("Data not initialized", VOID);
+	if (_streaming) { // Barge Game addition: the importer validates against the stock window and rebuilds maps
+		LOG(ERROR, "import_images is not supported while streaming; build regions and add them instead");
+		return;
+	}
 	// Validate images and determine common size
 	if (p_images.size() != TYPE_MAX) {
 		LOG(ERROR, "p_images.size() is ", p_images.size(), ". It should be ", TYPE_MAX, " even if some Images are blank or null");

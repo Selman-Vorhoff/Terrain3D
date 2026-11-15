@@ -5,6 +5,9 @@ extends SceneTree
 ## body, never leaks a slot, keeps every data query right through random churn, refreshes
 ## collision in place, and handles exhaustion, replacement and batched inserts.
 ## Exits with the number of failed checks (0 = pass).
+## expect-error: No resident region
+## expect-error: Slot pool exhausted
+## expect-error: change_region_size is not supported
 
 const CAPACITY := 30
 const CYCLES := 500

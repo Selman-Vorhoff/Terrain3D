@@ -117,7 +117,8 @@ vec3 get_index_uv(const vec2 uv2) {
 	int bounds = int(uint(rel.x | rel.y) < uint(_region_map_size));
 	ivec2 pos = (loc + _region_map_size / 2) & ivec2(_region_map_size - 1); // wraparound entry
 	int layer_index = _region_map[ pos.y * _region_map_size + pos.x ] * bounds - 1;
-	return vec3(uv2 - _region_locations[layer_index], float(layer_index));
+	// Barge Game: never index the location table with -1 (missing region) or a dummy id
+	return vec3(uv2 - _region_locations[max(layer_index, 0)], float(layer_index));
 }
 
 ////////////////////////
@@ -146,7 +147,7 @@ void accumulate_material(const mat3 TNB, const float weight, const ivec3 index,
 	h *= control_scale;
 
 	// Index position for detiling.
-	vec2 i_pos = fma(_region_locations[index.z], vec2(_region_size), vec2(index.xy));
+	vec2 i_pos = fma(_region_locations[max(index.z, 0)], vec2(_region_size), vec2(index.xy)); // Barge Game: never index the location table with -1 (missing region) or a dummy id
 	i_pos *= _vertex_spacing * control_scale;
 
 	// Projection

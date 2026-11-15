@@ -293,7 +293,8 @@ void start() {
 			pos.xz = vec2(100000.0);
 	}
 
-	if (length(camera_position - pos) > max_dist || get_index_coord(pos.xz).z < 0) {
+	// Barge Game: get_index_coord takes vertex units (fixes 0.25 m spacing; was world metres)
+	if (length(camera_position - pos) > max_dist || get_index_coord(pos.xz * _vertex_density).z < 0) {
 		pos.y = 0. / 0.;
 		pos.xz = vec2(100000.0);
 	} else {

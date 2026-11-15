@@ -3,6 +3,10 @@ extends SceneTree
 ## (Terrain3DData.set_region_window_origin) and regions far from the origin:
 ##   godot --headless --path project --script res://tests/test_region_window.gd
 ## Exits with the number of failed checks (0 = pass).
+## expect-error: The region window can only move while streaming
+## expect-error: out of bounds. Max:
+## expect-error: is beyond +-
+## expect-error: Region window origin
 
 const CAPACITY := 64
 const RS := 64
@@ -193,23 +197,50 @@ func _run() -> void:
 	ok(is_equal_approx(_ray_height(300 * RS + 32.0, 300 * RS + 32.0), _sig(Vector2i(300, 300))),
 			"collision unchanged after moving the window")
 
-	# Disk round trip at far locations (wide file names).
-	var dir := "user://barge_window_test"
-	DirAccess.make_dir_recursive_absolute(dir)
-	for f in DirAccess.get_files_at(dir):
-		DirAccess.remove_absolute(dir + "/" + f)
+	# Disk round trip at far locations (wide file names). A fresh directory and heights
+	# unique to this run, so leftovers from an earlier run cannot make it pass.
+	var run_id := "%d_%d" % [Time.get_unix_time_from_system(), Time.get_ticks_usec()]
+	var dir := "user://barge_window_test_" + run_id
+	ok(DirAccess.make_dir_recursive_absolute(dir) == OK, "created %s" % dir)
+	ok(DirAccess.get_files_at(dir).size() == 0, "test directory starts empty")
+	var run_height := 500.0 + float(Time.get_ticks_usec() % 1000) * 0.125
 	for loc in [Vector2i(300, -1234), Vector2i(-5000, 4000)]:
+		ok(d.add_region(_make_region(loc, run_height)) == OK, "replace %s with this run's height" % loc)
 		d.get_region(loc).set_modified(true)
 		d.save_region(loc, dir, false)
-		ok(FileAccess.file_exists(dir + "/" + Terrain3DUtil.location_to_filename(loc)), "saved %s" % loc)
+		var path := dir + "/" + Terrain3DUtil.location_to_filename(loc)
+		ok(FileAccess.file_exists(path), "saved %s to %s" % [loc, path.get_file()])
 		ok(d.evict_region(loc) == OK, "evict %s before reload" % loc)
+		ok(not d.has_region(loc), "%s gone after eviction" % loc)
 		d.load_region(loc, dir)
-		ok(d.has_region(loc) and is_equal_approx(d.get_height(Vector3(loc.x * RS + 1.0, 0.0, loc.y * RS + 1.0)), _sig(loc)),
-				"reloaded %s from disk" % loc)
+		ok(d.has_region(loc) and is_equal_approx(d.get_height(Vector3(loc.x * RS + 1.0, 0.0, loc.y * RS + 1.0)), run_height),
+				"reloaded %s from disk with this run's height %s" % [loc, run_height])
+		_resident[loc] = run_height
 	_check_map("after disk round trip")
+	for f in DirAccess.get_files_at(dir):
+		ok(DirAccess.remove_absolute(dir + "/" + f) == OK, "removed %s" % f)
+	ok(DirAccess.remove_absolute(dir) == OK, "removed test directory")
 
-	# Limits
+	# Limits: +-2^19 regions, compared without overflow; the window's last region must be
+	# inside the limit too.
+	var limit := 1 << 19
 	ok(d.add_region(_make_region(Vector2i(600000, 0), 1.0)) != OK, "location beyond the limit refused")
+	ok(d.add_region(_make_region(Vector2i(-2147483648, 0), 1.0)) != OK, "INT32_MIN location refused")
+	ok(d.add_region(_make_region(Vector2i(0, -2147483648), 1.0)) != OK, "INT32_MIN location refused (y)")
+	for loc in [Vector2i(limit, limit), Vector2i(-limit, -limit)]:
+		if d.get_free_slot_count() == 0:
+			var any: Vector2i = _resident.keys()[0]
+			d.evict_region(any)
+			_resident.erase(any)
+		_add(loc)
+	d.set_region_window_origin(Vector2i(limit - 31, limit - 31))
+	ok(d.get_region_window_origin() == Vector2i(limit - 31, limit - 31), "window can reach the last region")
+	ok(d.is_in_region_window(Vector2i(limit, limit)), "region at the limit is inside that window")
+	d.set_region_window_origin(Vector2i(limit - 30, limit - 30))
+	ok(d.get_region_window_origin() == Vector2i(limit - 31, limit - 31), "window past the limit refused")
+	d.set_region_window_origin(Vector2i(-limit, -limit))
+	ok(d.is_in_region_window(Vector2i(-limit, -limit)), "region at the negative limit is inside the window")
+	_check_map("at the limits")
 	d.set_region_window_origin(Vector2i(-16, -16))
 
 	_t.free()

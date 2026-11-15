@@ -142,8 +142,10 @@ public:
 	void set_region_window_origin(const Vector2i &p_origin);
 	Vector2i get_region_window_origin() const { return _region_window_origin; }
 	bool is_in_region_window(const Vector2i &p_region_loc) const { return get_region_map_index(p_region_loc) >= 0; }
+	// Compared without ABS, which overflows for INT32_MIN.
 	static bool is_valid_region_location(const Vector2i &p_region_loc) {
-		return ABS(p_region_loc.x) <= REGION_LOCATION_LIMIT && ABS(p_region_loc.y) <= REGION_LOCATION_LIMIT;
+		return p_region_loc.x >= -REGION_LOCATION_LIMIT && p_region_loc.x <= REGION_LOCATION_LIMIT &&
+				p_region_loc.y >= -REGION_LOCATION_LIMIT && p_region_loc.y <= REGION_LOCATION_LIMIT;
 	}
 
 	void do_for_regions(const Rect2i &p_area, const Callable &p_callback);

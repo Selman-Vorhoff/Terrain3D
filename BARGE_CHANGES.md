@@ -143,9 +143,20 @@ Each change gets a section:
   displacement buffer, `check_region` (backgrounds) and the editor's region boundary box
   uses the window. The addon's extra shaders (lightweight, minimum, particle example) got
   the same lookup, and the particle example uploads the origin.
-- **Not changed:** the editor dummies in `ui.gd` compute stock indices, which match at the
-  default window, and the editor never moves it. Instancer meshes of resident regions
-  outside the window still render (they are not windowed).
+- **Not changed / known limits:** the editor dummies in `ui.gd` compute stock indices, which
+  match at the default window, and the editor never moves it. Instancer meshes of resident
+  regions outside the window still render (they are not windowed). With the FLAT world
+  background the GPU treats the window edge like the edge of the world (it blends to the
+  background there), while the CPU blend only looks at which regions exist, so heights can
+  differ in a strip one region wide at the window edge; the game uses background NONE and
+  keeps the window far larger than the play area, so this is documented, not fixed.
+- **Hardening (Codex review of this change):** the C# wrapper `Terrain3DData.cs` calls
+  `get_region_map_index` as an instance method and wraps the new streaming and window API;
+  the shaders clamp the region index before reading `_region_locations` (an empty map
+  entry is −1); `is_valid_region_location` compares without `ABS` (INT32_MIN overflowed
+  it); the window origin is refused if its last region (`origin + 31`, computed in int64)
+  would pass the limit; `import_images` is refused while streaming (it adds regions the
+  classic way); the particle example converts world to vertex units before its lookup.
 - **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d_region.cpp`,
   `src/terrain_3d_material.cpp`, `src/shaders/{main,displacement_buffer,backgrounds,editor_functions}.glsl`,
   `project/addons/terrain_3d/extras/shaders/{lightweight,minimum}.gdshader`,
@@ -154,8 +165,11 @@ Each change gets a section:
   layout; regions at (±300, ±300), (300, −1234), (−5000, 4000); map invariants and
   unchanged data queries at eight window positions including a 600 region jump; RIDs kept;
   wraparound pair and eviction outside the window; collision far out independent of the
-  window; disk round trip with wide names; location limit).
+  window; disk round trip with wide names into a fresh directory with heights unique to
+  the run; location limits including INT32_MIN and a window reaching the last region).
   `test_region_window_render.gd` and `test_extra_shaders.gd` (windowed only: the GPU draws a
   region exactly when it is inside the window, including the wraparound case; the extra
   shaders compile and follow the window). Golden test: worlds inside ±16 unchanged.
+  `tools/terrain3d_fork/test.py` (game repo) fails a test on any engine `ERROR:` line the
+  test does not declare with `## expect-error:`.
 - **Upstream:** none yet. Upstream #491 asks for this; a PR would follow #1004.

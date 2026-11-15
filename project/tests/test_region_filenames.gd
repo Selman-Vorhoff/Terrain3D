@@ -2,6 +2,8 @@ extends SceneTree
 ## Barge Game addition. Headless test for region file names at any signed location:
 ##   godot --headless --path project --script res://tests/test_region_filenames.gd
 ## Exits with the number of failed checks (0 = pass).
+## expect-error: Malformed string
+## expect-error: Location out of range
 
 var _fail := 0
 var _started := false

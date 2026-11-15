@@ -162,7 +162,8 @@ vec3 get_index_uv(const vec2 uv2) {
 	int layer_index = is_region * raw_index
 	               + is_dummy * (map_val - 1)
 	               - (1 - is_region - is_dummy);
-	return vec3(uv2 - _region_locations[layer_index], float(layer_index));
+	// Barge Game: never index the location table with -1 (missing region) or a dummy id
+	return vec3(uv2 - _region_locations[max(layer_index, 0)], float(layer_index));
 }
 
 float interpolated_height(vec2 pos) {
@@ -291,7 +292,7 @@ void accumulate_material(vec3 base_ddx, vec3 base_ddy, const mat3 TNB, const flo
 	h *= control_scale;
 
 	// Index position for detiling.
-	vec2 i_pos = fma(_region_locations[index.z], vec2(_region_size), vec2(index.xy));
+	vec2 i_pos = fma(_region_locations[max(index.z, 0)], vec2(_region_size), vec2(index.xy)); // Barge Game: never index the location table with -1 (missing region) or a dummy id
 	i_pos *= _vertex_spacing * control_scale;
 
 	// Projection
