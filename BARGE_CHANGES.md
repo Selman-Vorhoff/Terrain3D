@@ -47,3 +47,23 @@ Each change gets a section:
 - **Files:** `project/addons/terrain_3d/src/double_slider.gd`, `project/addons/terrain_3d/src/export_plugin.gd`.
 - **Test:** open the game in the 4.7.2 editor (no DoubleSlider errors); headless export.
 - **Upstream:** none (upstream targets Godot 4.5).
+
+### 2. Region file names for any signed location
+
+- **What:** `Terrain3DUtil::string_to_location` (behind `filename_to_location`) reads each
+  coordinate as a sign character (`_` positive, `-` negative) followed by any number of
+  digits, so `terrain3d_100-1234.res` is region (100, −1234). Malformed names, and values
+  outside int32 or equal to the reserved error value `INT32_MAX`, are rejected with an error.
+  The writer is unchanged: it already widened past two digits, only the reader cut every
+  coordinate to three characters.
+- **Why:** the region window (change 4) allows regions far from the origin. At 0.25 m and
+  256 m regions, a 65 km world needs locations up to ±127, and stock misreads any
+  coordinate of 100 or more (`_100_00` read back as (10, 0)).
+- **Compatibility:** names for locations in −99..99 are byte-for-byte the stock names, so
+  every stock data folder loads unchanged, and stock can still read our folders as long as
+  they stay inside its ±16 window.
+- **Files:** `src/terrain_3d_util.cpp`.
+- **Test:** `project/tests/test_region_filenames.gd` (stock names unchanged, round trips up
+  to int32 limits, uniqueness, malformed names rejected, a stock-named folder loads with the
+  right heights). The disk round trip at locations beyond ±16 is in the region-window test.
+- **Upstream:** none yet; candidate for a PR together with the window change.

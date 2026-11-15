@@ -87,14 +87,52 @@ Vector2i Terrain3DUtil::filename_to_location(const String &p_filename) {
 }
 
 // Expects a string formatted as: "±##±##" which returns (##,##)
+// Each coordinate starts with a sign character, '_' for positive or '-' for negative,
+// followed by at least one digit. Two digits is the usual width, but any width is read,
+// so "_100-1234" returns (100, -1234).
+// Barge Game addition: stock read exactly 3 characters per coordinate, which misread
+// any coordinate of 100 or more in either direction.
 Vector2i Terrain3DUtil::string_to_location(const String &p_string) {
-	String x_str = p_string.left(3).replace("_", "");
-	String y_str = p_string.right(3).replace("_", "");
-	if (!x_str.is_valid_int() || !y_str.is_valid_int()) {
+	auto is_sign = [](const char32_t c) { return c == '_' || c == '-'; };
+	auto is_valid_coord = [](const String &p_coord) {
+		// p_coord is a sign followed by digits only. Up to 10 digits fits int32 for valid input.
+		if (p_coord.length() < 2 || p_coord.length() > 11) {
+			return false;
+		}
+		for (int i = 1; i < p_coord.length(); i++) {
+			if (p_coord[i] < '0' || p_coord[i] > '9') {
+				return false;
+			}
+		}
+		return true;
+	};
+	auto to_coord = [](const String &p_coord) -> int64_t {
+		int64_t value = p_coord.substr(1).to_int();
+		return (p_coord[0] == '-') ? -value : value;
+	};
+
+	// The second coordinate starts at the first sign after the first character.
+	int split = -1;
+	for (int i = 1; i < p_string.length(); i++) {
+		if (is_sign(p_string[i])) {
+			split = i;
+			break;
+		}
+	}
+	String x_str = (split > 0) ? p_string.substr(0, split) : String();
+	String y_str = (split > 0) ? p_string.substr(split) : String();
+	if (p_string.is_empty() || !is_sign(p_string[0]) || !is_valid_coord(x_str) || !is_valid_coord(y_str)) {
 		LOG(ERROR, "Malformed string '", p_string, "'. Result: ", x_str, ", ", y_str);
 		return V2I_MAX;
 	}
-	return Vector2i(x_str.to_int(), y_str.to_int());
+	int64_t x = to_coord(x_str);
+	int64_t y = to_coord(y_str);
+	// INT32_MAX is reserved for V2I_MAX, the error value.
+	if (x < INT32_MIN || x >= INT32_MAX || y < INT32_MIN || y >= INT32_MAX) {
+		LOG(ERROR, "Location out of range in string '", p_string, "'");
+		return V2I_MAX;
+	}
+	return Vector2i(int32_t(x), int32_t(y));
 }
 
 // Expects a v2i(-1,2) and returns terrain3d-01_02.res
@@ -103,6 +141,8 @@ String Terrain3DUtil::location_to_filename(const Vector2i &p_region_loc) {
 }
 
 // Expects a v2i(-1,2) and returns -01_02
+// Coordinates of 100 or more in either direction keep the sign character and grow wider,
+// e.g. v2i(100,-1234) returns _100-1234. Locations within -99..99 keep the stock names.
 String Terrain3DUtil::location_to_string(const Vector2i &p_region_loc) {
 	const String POS_REGION_FORMAT = "_%02d";
 	const String NEG_REGION_FORMAT = "%03d";
