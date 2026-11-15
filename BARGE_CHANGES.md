@@ -303,3 +303,17 @@ Each change gets a section:
   `project/tests/test_collision_targets_perf.gd` logs fill, step, idle and region flush
   times for the barge plus six players at 0.25 m with 48 m radius and 8 m shapes.
 - **Upstream:** none; a general feature that could be offered upstream with the window.
+
+### 7. Addon ships Windows and Linux x86_64 only; version 1.1.0-barge.1
+
+- **What:** `terrain.gdextension` lists only the Windows and Linux x86_64 libraries (debug
+  and release), and `plugin.cfg` says version `1.1.0-barge.1`.
+- **Why:** the fork builds only those two platforms (rules above). Entries for platforms we
+  do not build would point Godot at stock libraries that lack our changes, or at none.
+  The version tells a fork install from stock in the editor's plugin list. Because the
+  export plugin hashes the plugin version, exports also refresh when it changes.
+- **Files:** `project/addons/terrain_3d/terrain.gdextension`, `project/addons/terrain_3d/plugin.cfg`.
+- **Test:** the game's smoke run and full suite load the extension on Windows; the Linux
+  laptop loads it with the Linux build.
+- **Upstream:** none (game packaging). Bump the `-barge.N` suffix with each install that
+  changes behaviour.
