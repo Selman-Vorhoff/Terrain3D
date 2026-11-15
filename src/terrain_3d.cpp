@@ -167,9 +167,10 @@ void Terrain3D::_grab_camera() {
 		LOG(DEBUG, "Grabbing the in-game viewport camera: ", _camera.get_target());
 	}
 	if (!_camera.is_valid() && !_clipmap_target.is_valid()) {
-		// Barge Game: collision targets still need physics processing without a camera
-		// (a server, a respawn or a scene change); only the clipmap stops following.
-		if (_collision && _collision->is_dynamic_mode() && _collision->has_targets()) {
+		// Barge Game: dynamic collision still needs physics processing without a camera
+		// (a server, a respawn or a scene change) while it has something to follow:
+		// registered targets or the stock collision_target. The meshes snap to the origin.
+		if (_collision && _collision->is_dynamic_mode() && (_collision->has_targets() || _collision_target.is_valid())) {
 			LOG(DEBUG, "No clipmap target or camera; collision keeps following its targets");
 			return;
 		}
@@ -692,7 +693,9 @@ void Terrain3D::set_camera(Camera3D *p_camera) {
 	if (_camera.ptr() != p_camera) {
 		LOG(EXTREME, "Setting camera: ", p_camera);
 		_camera.set_target(p_camera);
-		if (_clipmap_target.is_valid()) {
+		// Barge Game: stock tested the clipmap target here, so a camera alone never resumed
+		// processing that _grab_camera() had stopped.
+		if (_camera.is_valid() || _clipmap_target.is_valid()) {
 			set_physics_process(true);
 		}
 	}

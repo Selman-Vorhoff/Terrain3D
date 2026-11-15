@@ -680,6 +680,9 @@ void Terrain3DCollision::add_target(Node3D *p_node, const real_t p_radius_m) {
 		if (t.node.get_target() == p_node) {
 			t.radius_m = p_radius_m;
 			_targets_dirty = true;
+			if (_terrain != nullptr) {
+				_terrain->set_physics_process(true);
+			}
 			LOG(INFO, "Collision target ", p_node, " radius now ", p_radius_m, " m");
 			return;
 		}
@@ -804,6 +807,11 @@ void Terrain3DCollision::set_mode(const CollisionMode p_mode) {
 		build();
 	} else {
 		destroy();
+	}
+	// Barge Game: processing may have stopped (no camera) while collision was disabled or
+	// full; dynamic collision with targets needs it again.
+	if (is_dynamic_mode() && _uses_targets() && _terrain != nullptr) {
+		_terrain->set_physics_process(true);
 	}
 }
 

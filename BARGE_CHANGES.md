@@ -287,8 +287,11 @@ Each change gets a section:
     region out refill too; new data for a resident region (replacement, edit sync) refills
     only its own shapes. The stock single-target refresh test widens by one region the
     same way.
-  - Collision keeps following registered targets when Terrain3D finds no camera and no
-    clipmap target (stock stops physics processing then); only the clipmap stops.
+  - Collision keeps following registered targets, or the stock `collision_target`, when
+    Terrain3D finds no camera and no clipmap target. Stock stops physics processing then.
+    The meshes then snap to the origin fallback. Processing resumes when a camera is set
+    (stock only resumed for a clipmap target), when dynamic collision with targets is
+    re-entered from another mode, and when a target is added or its radius changed.
   - Radii must be finite, above 0 and at most 4096 m.
   - Full collision modes ignore the targets.
 - **Stats:** `Terrain3DCollision.get_stats()`: `targets`, `shapes_total`, `shapes_active`,
@@ -326,9 +329,10 @@ Each change gets a section:
   and release), and `plugin.cfg` says version `1.1.0-barge.1`.
 - **Why:** the fork builds only those two platforms (rules above). Entries for platforms we
   do not build would point Godot at stock libraries that lack our changes, or at none.
-  The version tells a fork install from stock in the editor's plugin list. Because the
-  export plugin hashes the plugin version, exports also refresh when it changes.
-- **Files:** `project/addons/terrain_3d/terrain.gdextension`, `project/addons/terrain_3d/plugin.cfg`.
+  The version tells a fork install from stock in the editor's plugin list.
+- **Files:** `project/addons/terrain_3d/terrain.gdextension`, `project/addons/terrain_3d/plugin.cfg`
+  (commit a56a1b9 held only this entry; the two files landed two commits after
+  3e85e64).
 - **Test:** the game's smoke run and full suite load the extension on Windows; the Linux
   laptop loads it with the Linux build.
 - **Upstream:** none (game packaging). Bump the `-barge.N` suffix with each install that

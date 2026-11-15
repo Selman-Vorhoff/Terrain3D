@@ -256,7 +256,30 @@ func _run() -> void:
 	await _frames(5)
 	ok(is_equal_approx(_ray(b + Vector3(1, 0, 1)), 30.0), "no camera: the target moved and has ground (%s)" % _ray(b + Vector3(1, 0, 1)))
 	ok(is_nan(_ray(a + Vector3(1, 0, 1))), "no camera: its old ground released")
+	# Mode round trips without a camera: processing must resume for dynamic collision.
+	for mode in [0, 3]: # Disabled, Full / Game
+		_t.collision_mode = mode
+		await _frames()
+		_t.collision_mode = 1
+		tn.global_position = a if tn.global_position == b else b
+		await _frames(5)
+		var want := 10.0 if tn.global_position == a else 30.0
+		ok(is_equal_approx(_ray(tn.global_position + Vector3(1, 0, 1)), want),
+				"no camera, mode %d -> dynamic: ground follows the moved target" % mode)
+	# Back to the stock collision_target without a camera: it is still followed.
 	_t.clear_collision_targets()
+	stock_target.global_position = b
+	await _frames(5)
+	ok(is_equal_approx(_ray(b + Vector3(1, 0, 1)), 30.0), "no camera, stock target: ground follows it (%s)" % _ray(b + Vector3(1, 0, 1)))
+	ok(_t.is_physics_processing(), "no camera, stock target: processing stays on")
+	# Nothing to follow: processing stops (stock); a camera alone resumes it.
+	_t.set_collision_target(null)
+	await _frames()
+	ok(not _t.is_physics_processing(), "nothing to follow and no camera: processing stops (stock)")
+	var cam2 := Camera3D.new()
+	root.add_child(cam2)
+	_t.set_camera(cam2)
+	ok(_t.is_physics_processing(), "a camera alone resumes processing")
 
 	print("STATS final %s" % _stats())
 	_t.free()
