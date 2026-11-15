@@ -24,6 +24,9 @@ public: // Constants
 	// Region locations are limited so that location * region_size (2048 at most) stays
 	// within int32 vertex coordinates.
 	static inline const int REGION_LOCATION_LIMIT = 1 << 19;
+	// Barge Game: subresources (layers x mip levels) one pool array may have on D3D12, the
+	// same safety limit the game's map importer uses.
+	static constexpr int64_t D3D12_POOL_SUBRESOURCE_LIMIT = 4096;
 
 	enum HeightFilter {
 		HEIGHT_FILTER_NEAREST,

@@ -607,12 +607,24 @@ void Terrain3DData::enable_streaming(const int p_slot_capacity) {
 Error Terrain3DData::_pool_create_arrays(const Terrain3DRegion *p_region) {
 	Ref<Image> maps[3] = { p_region->get_height_map(), p_region->get_control_map(), p_region->get_active_color_map() };
 	TypedArray<Image> layers[3];
-	_pool_bytes_per_slot = 0;
+	// D3D12 limits the subresources (layers x mip levels) of one texture array. Arrays are
+	// allocated at full capacity, so the capacity must fit before anything is created.
+	const bool d3d12 = RS->get_current_rendering_driver_name() == "d3d12";
 	for (int t = 0; t < 3; t++) {
 		if (maps[t].is_null() || maps[t]->is_empty()) {
 			LOG(ERROR, "Region ", p_region->get_location(), " has no usable map of type ", TYPESTR[t]);
 			return FAILED;
 		}
+		const int64_t subresources = int64_t(_slot_capacity) * (maps[t]->get_mipmap_count() + 1);
+		if (d3d12 && subresources > D3D12_POOL_SUBRESOURCE_LIMIT) {
+			LOG(ERROR, "Slot capacity ", _slot_capacity, " needs ", subresources, " subresources for the ", TYPESTR[t],
+					" array, over the D3D12 limit of ", D3D12_POOL_SUBRESOURCE_LIMIT,
+					". Enable streaming with at most ", D3D12_POOL_SUBRESOURCE_LIMIT / (maps[t]->get_mipmap_count() + 1), " slots.");
+			return ERR_OUT_OF_MEMORY;
+		}
+	}
+	_pool_bytes_per_slot = 0;
+	for (int t = 0; t < 3; t++) {
 		_pool_bytes_per_slot += maps[t]->get_data_size();
 		for (int i = 0; i < _slot_capacity; i++) {
 			layers[t].push_back(maps[t]);
@@ -817,7 +829,8 @@ Dictionary Terrain3DData::get_streaming_stats() const {
 	stats["upload_usec_max"] = int64_t(_pool_upload_usec_max);
 	stats["upload_usec_mean"] = _pool_inserts > 0 ? double(_pool_upload_usec_total) / double(_pool_inserts) : 0.0;
 	stats["bytes_per_slot"] = _pool_bytes_per_slot; // CPU image bytes; GPU use is about the same
-	stats["bytes_allocated"] = _pool_bytes_per_slot * _slot_capacity;
+	stats["bytes_allocated"] = _pool_bytes_per_slot * _slot_capacity; // whole capacity, from the first insert
+	stats["bytes_resident"] = _pool_bytes_per_slot * (_slot_capacity - _free_slots.size());
 	stats["window_origin"] = _region_window_origin;
 	stats["window_moves"] = int64_t(_pool_window_moves);
 	int in_window = 0;

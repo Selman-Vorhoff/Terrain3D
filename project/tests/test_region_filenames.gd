@@ -83,10 +83,12 @@ func _malformed_names_rejected() -> void:
 # A folder written with stock names (locations inside ±16) loads with the same locations
 # and heights.
 func _stock_folder_loads() -> void:
-	var dir := "user://barge_filename_test"
-	DirAccess.make_dir_recursive_absolute(dir)
-	for f in DirAccess.get_files_at(dir):
-		DirAccess.remove_absolute(dir + "/" + f)
+	# A fresh directory and heights unique to this run, so files left by an earlier run
+	# (or a save that silently failed) cannot make the checks pass.
+	var dir := "user://barge_filename_test_%d_%d" % [Time.get_unix_time_from_system(), Time.get_ticks_usec()]
+	ok(DirAccess.make_dir_recursive_absolute(dir) == OK, "created %s" % dir)
+	ok(DirAccess.get_files_at(dir).size() == 0, "test directory starts empty")
+	var base := float(Time.get_ticks_usec() % 1000) * 0.125
 
 	var cam := Camera3D.new()
 	root.add_child(cam)
@@ -97,11 +99,13 @@ func _stock_folder_loads() -> void:
 	for loc in locs:
 		t.data.add_region_blank(loc, false)
 		var r: Terrain3DRegion = t.data.get_region(loc)
-		r.get_height_map().fill(Color(float(loc.x * 100 + loc.y), 0, 0))
+		r.get_height_map().fill(Color(base + float(loc.x * 100 + loc.y), 0, 0))
 		r.set_modified(true)
 	t.data.update_maps()
 	for loc in locs:
 		t.data.save_region(loc, dir, false)
+		var path := dir + "/" + Terrain3DUtil.location_to_filename(loc)
+		ok(FileAccess.file_exists(path), "saved %s as %s" % [loc, path.get_file()])
 	t.free()
 
 	var t2 := Terrain3D.new()
@@ -113,7 +117,10 @@ func _stock_folder_loads() -> void:
 	for loc in locs:
 		var p := Vector3((loc.x + 0.5) * rs, 0.0, (loc.y + 0.5) * rs)
 		var h: float = t2.data.get_height(p)
-		ok(t2.data.has_region(loc) and is_equal_approx(h, float(loc.x * 100 + loc.y)),
+		ok(t2.data.has_region(loc) and is_equal_approx(h, base + float(loc.x * 100 + loc.y)),
 				"region %s loaded with height %s" % [loc, h])
 	t2.free()
 	cam.free()
+	for f in DirAccess.get_files_at(dir):
+		ok(DirAccess.remove_absolute(dir + "/" + f) == OK, "removed %s" % f)
+	ok(DirAccess.remove_absolute(dir) == OK, "removed test directory")
