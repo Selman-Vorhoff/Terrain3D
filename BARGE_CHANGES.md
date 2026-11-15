@@ -35,4 +35,15 @@ Each change gets a section:
 
 ## Changes
 
-(none yet)
+### 1. Godot 4.7 editor compatibility (addon scripts)
+
+- **What:** `double_slider.gd` reads the editor scale with `EditorInterface.get_editor_scale()`
+  instead of the `interface/editor/display_scale` setting, which can be Nil in Godot 4.7.
+  `export_plugin.gd` takes the version hash from the plugin instead of the selected terrain
+  node, so a command-line export with no Terrain3D selected does not fail.
+- **Why:** the game runs Godot 4.7.2. These two edits were made in the game's installed
+  addon during the 4.7 upgrade (game commit bcd0c1bdf); the fork carries them so installing
+  fork builds does not undo them.
+- **Files:** `project/addons/terrain_3d/src/double_slider.gd`, `project/addons/terrain_3d/src/export_plugin.gd`.
+- **Test:** open the game in the 4.7.2 editor (no DoubleSlider errors); headless export.
+- **Upstream:** none (upstream targets Godot 4.5).
