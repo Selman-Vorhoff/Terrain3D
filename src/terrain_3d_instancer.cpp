@@ -98,6 +98,11 @@ void Terrain3DInstancer::_process_updates() {
 		if (!region->get_instances().has(mesh_id)) {
 			continue;
 		}
+		// Barge Game: while streaming, only regions holding a slot (inside the region window)
+		// are drawn; resident regions outside it are data only and get no meshes.
+		if (data->is_streaming() && data->get_region_id(region_loc) < 0) {
+			continue;
+		}
 		_update_mmi_by_region(region, mesh_id);
 	}
 	_queued_updates.clear();

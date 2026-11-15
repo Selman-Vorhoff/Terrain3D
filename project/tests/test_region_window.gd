@@ -65,7 +65,9 @@ func _expected_index(loc: Vector2i) -> int:
 
 
 # The map holds exactly the resident regions inside the window, each at its wraparound
-# entry, with slot + 1; and every data query is the same as without any window.
+# entry, with slot + 1. Only regions inside the window hold a slot (GPU layer); the ones
+# outside are data only (id -1) but still resident. Every data query is the same as
+# without any window.
 func _check_map(label: String) -> void:
 	var d: Terrain3DData = _t.data
 	var origin: Vector2i = d.get_region_window_origin()
@@ -74,17 +76,19 @@ func _check_map(label: String) -> void:
 	var expected_entries := 0
 	for loc: Vector2i in _resident:
 		var slot: int = d.get_region_id(loc)
-		ok(slot >= 0, "%s: %s resident with slot %d" % [label, loc, slot])
 		var inside := _in_window(loc, origin)
+		ok(d.has_region(loc), "%s: %s resident" % [label, loc])
+		ok((slot >= 0) == inside, "%s: %s holds a slot only inside the window (slot %d, inside %s)" % [label, loc, slot, inside])
 		ok(d.is_in_region_window(loc) == inside, "%s: is_in_region_window %s == %s" % [label, loc, inside])
 		var idx: int = d.get_region_map_index(loc)
 		if inside:
 			expected_entries += 1
 			ok(idx == _expected_index(loc), "%s: map index of %s is %d, expected %d" % [label, loc, idx, _expected_index(loc)])
 			ok(idx >= 0 and map[idx] == slot + 1, "%s: map entry for %s holds slot %d" % [label, loc, slot])
+			ok(slot >= 0 and shader_locs[slot] == loc, "%s: shader table slot %d holds %s" % [label, slot, loc])
 		else:
 			ok(idx == -1, "%s: %s outside window has index -1 (got %d)" % [label, loc, idx])
-		ok(shader_locs[slot] == loc, "%s: shader table slot %d holds %s" % [label, slot, loc])
+			ok(not shader_locs.has(loc), "%s: %s outside the window is not in the shader table" % [label, loc])
 	var nonzero := 0
 	for i in map.size():
 		if map[i] != 0:
@@ -93,6 +97,9 @@ func _check_map(label: String) -> void:
 			ok(loc != EMPTY and _in_window(loc, origin) and _expected_index(loc) == i,
 					"%s: entry %d points at %s inside the window" % [label, i, loc])
 	ok(nonzero == expected_entries, "%s: %d map entries, expected %d" % [label, nonzero, expected_entries])
+	var stats: Dictionary = d.get_streaming_stats()
+	ok(int(stats["slots_used"]) == expected_entries, "%s: %d slots used for %d regions in the window" % [label, stats["slots_used"], expected_entries])
+	ok(int(stats["regions_resident"]) == _resident.size(), "%s: %d resident" % [label, stats["regions_resident"]])
 
 
 # Data queries at sample points in every resident region (and some empty ones).
@@ -107,7 +114,7 @@ func _sample_queries() -> Array:
 		for p: Vector2 in [Vector2(0.37, 0.61), Vector2(10.2, 5.5), Vector2(33.3, 5.9), Vector2(63.4, 63.4)]:
 			var pos := Vector3(loc.x * RS + p.x, 0.0, loc.y * RS + p.y)
 			out.append([loc, p, str(d.get_height(pos)), str(d.get_normal(pos)), d.has_regionp(pos),
-					d.get_control(pos), d.get_region_idp(pos), d.has_region(loc)])
+					d.get_control(pos), d.has_region(loc)]) # not get_region_idp: that is the window-dependent GPU layer
 	return out
 
 

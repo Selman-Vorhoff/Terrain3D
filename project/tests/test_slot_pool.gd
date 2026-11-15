@@ -3,7 +3,7 @@ extends SceneTree
 ##   godot --headless --path project --script res://tests/test_slot_pool.gd
 ## Checks that adding and evicting regions keeps the texture array RIDs and the collision
 ## body, never leaks a slot, keeps every data query right through random churn, refreshes
-## collision in place, and handles exhaustion, replacement and batched inserts.
+## collision in place, and handles a full pool, replacement and batched inserts.
 ## Exits with the number of failed checks (0 = pass).
 ## expect-error: No resident region
 ## expect-error: Slot pool exhausted
@@ -192,7 +192,9 @@ func _run() -> void:
 	ok(is_equal_approx(h1, 777.0), "collision follows re-added (0,0): %s" % h1)
 	ok(_t.collision.get_rid() == col_rid, "collision body not rebuilt")
 
-	# Exhaustion fails cleanly and changes nothing.
+	# A full pool keeps accepting data. A region inside the window then stays data only (no
+	# slot, reported once) but answers queries; it takes the next slot that comes free.
+	# Outside the window a region never needs a slot.
 	var probe := 0
 	while _resident.size() < CAPACITY:
 		var loc := Vector2i(-16 + probe % 32, -16 + probe / 32)
@@ -200,9 +202,23 @@ func _run() -> void:
 		if not _resident.has(loc):
 			d.add_region(_make_region(loc, _sig(loc)))
 			_resident[loc] = _sig(loc)
-	var extra := Vector2i(15, 15) if not _resident.has(Vector2i(15, 15)) else Vector2i(14, 15)
-	ok(d.add_region(_make_region(extra, 1.0)) != OK, "add beyond capacity fails")
 	_check_invariants("full pool")
+	var extra := Vector2i(15, 15) if not _resident.has(Vector2i(15, 15)) else Vector2i(14, 15)
+	ok(d.add_region(_make_region(extra, 1.0)) == OK, "add inside the window with the pool full is accepted")
+	ok(d.has_region(extra) and d.get_region_id(extra) == -1, "it is resident without a slot")
+	ok(is_equal_approx(d.get_height(_center(extra)), 1.0), "and answers get_height")
+	ok(int(d.get_streaming_stats()["regions_undrawn"]) == 1, "stats report one undrawn region")
+	var far := Vector2i(400, 400)
+	ok(d.add_region(_make_region(far, 2.0)) == OK and d.get_region_id(far) == -1, "a region outside the window needs no slot")
+	ok(int(d.get_streaming_stats()["regions_undrawn"]) == 1, "it is not counted as undrawn")
+	var freed: Vector2i = _resident.keys()[0]
+	d.evict_region(freed)
+	_resident.erase(freed)
+	ok(d.get_region_id(extra) >= 0, "the undrawn region takes the freed slot")
+	ok(int(d.get_streaming_stats()["regions_undrawn"]) == 0, "nothing undrawn any more")
+	_resident[extra] = 1.0
+	d.evict_region(far)
+	_check_invariants("after the freed slot was reused")
 
 	# Guards: classic-only operations refuse while streaming.
 	d.change_region_size(128)

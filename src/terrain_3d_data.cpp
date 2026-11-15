@@ -24,8 +24,9 @@ void Terrain3DData::_clear() {
 	_slot_locs.clear();
 	_pool_signals_pending = false;
 	_pool_bytes_per_slot = 0;
-	_pool_uploaded_ids.clear();
+	_pool_synced.clear();
 	_pool_dirty.clear();
+	_pool_undrawn.clear();
 	_region_window_origin = DEFAULT_REGION_WINDOW_ORIGIN;
 	_region_map_dirty = true;
 	_region_map.clear();
@@ -647,33 +648,25 @@ Error Terrain3DData::_pool_create_arrays(const Terrain3DRegion *p_region) {
 		_pool_layer_mipmaps[t] = maps[t]->has_mipmaps();
 		_pool_layer_size[t] = maps[t]->get_size();
 	}
-	_pool_uploaded_ids.resize(_slot_capacity * 3);
-	_pool_uploaded_ids.fill(0);
 	LOG(INFO, "Streaming pool allocated: ", _slot_capacity, " slots, about ",
 			(_pool_bytes_per_slot * _slot_capacity) / (1024 * 1024), " MB of texture memory");
 	return OK;
 }
 
-// Inserts one region into a free slot: one texture layer upload per map type and one
-// region map entry. With p_update = false the signals (material uniforms, mesher AABBs,
-// collision refresh) are held back until update_maps() is called, for bulk inserts.
+// Makes a region resident. Inside the region window it takes a slot (one texture layer
+// upload per map type and one region map entry); outside it stays CPU data only until the
+// window reaches it. Data queries and collision see it either way. With p_update = false
+// the signals (material uniforms, mesher AABBs, collision refresh) are held back until
+// update_maps() is called, for bulk inserts.
 Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, const bool p_update) {
 	ERR_FAIL_COND_V(!_streaming, FAILED);
 	ERR_FAIL_COND_V(p_region.is_null(), FAILED);
 	Vector2i loc = p_region->get_location();
-	// Barge Game: any location is accepted while streaming. Only regions inside the region
-	// window get a map entry (and are drawn); the rest stay resident for data queries.
+	// Barge Game: any location is accepted while streaming.
 	ERR_FAIL_COND_V_MSG(!is_valid_region_location(loc), FAILED,
 			vformat("Region location %s is beyond +-%d", loc, REGION_LOCATION_LIMIT));
-	int map_index = get_region_map_index(loc);
 	ERR_FAIL_COND_V_MSG(p_region->get_region_size() != _region_size, FAILED,
 			vformat("Region %s is %d px but the pool is %d px", loc, p_region->get_region_size(), _region_size));
-	bool replacing = _slot_of.has(loc);
-	if (!replacing && _free_slots.is_empty()) {
-		LOG(ERROR, "Slot pool exhausted (", _slot_capacity, " slots); cannot add region ", loc,
-				". Evict regions first or enable streaming with more slots.");
-		return ERR_OUT_OF_MEMORY;
-	}
 	p_region->sanitize_maps();
 	// Same colour map handling as add_region at runtime: free the copy that is not needed.
 	const CompressMode mode = _terrain->get_color_compress_mode();
@@ -683,6 +676,8 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 		p_region->clear_color_map();
 	}
 
+	// Every resident region matches the pool's layers, drawn or not, so any of them can take
+	// a slot later. The first region fixes the layout.
 	Ref<Image> maps[3] = { p_region->get_height_map(), p_region->get_control_map(), p_region->get_active_color_map() };
 	if (!_generated_height_maps.get_rid().is_valid()) {
 		if (_pool_create_arrays(p_region.ptr()) != OK) {
@@ -692,43 +687,39 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 		return FAILED;
 	}
 
-	int slot;
-	if (replacing) {
-		slot = _slot_of[loc];
-		LOG(INFO, "Replacing resident region at ", loc, " in slot ", slot);
-		// The per region instancer update below only visits what the new region holds;
-		// meshes or cells the old one had would keep rendering.
+	const int *held = _slot_of.getptr(loc);
+	if (held != nullptr) {
+		// Replacing a drawn region: same slot, upload in place. The per region instancer
+		// update below only visits what the new region holds, so destroy the old meshes first.
+		LOG(INFO, "Replacing resident region at ", loc, " in slot ", *held);
 		if (_terrain->get_instancer() != nullptr) {
 			_terrain->get_instancer()->destroy_mmis_by_region(loc);
 		}
-	} else {
-		slot = _free_slots[_free_slots.size() - 1];
-		_free_slots.remove_at(_free_slots.size() - 1);
-		_slot_of[loc] = slot;
-		_slot_locs[slot] = loc;
 	}
 	p_region->set_deleted(false);
 	_regions[loc] = p_region;
 	if (!_region_locations.has(loc)) {
 		_region_locations.push_back(loc);
 	}
-	if (map_index >= 0) {
-		_region_map[map_index] = slot + 1;
-	}
-
 	_pool_dirty.erase(loc);
-	uint64_t start = Time::get_singleton()->get_ticks_usec();
-	_pool_upload(slot, maps);
-	uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
 	_pool_inserts++;
-	_pool_upload_usec_last = usec;
-	_pool_upload_usec_total += usec;
-	_pool_upload_usec_max = MAX(_pool_upload_usec_max, usec);
-	LOG(DEBUG, "Streamed region ", loc, " into slot ", slot, " in ", usec, " us");
 
-	// Per region instancer build only; a rebuild would recreate every instance in the world.
-	if (_terrain->get_instancer() != nullptr) {
-		_terrain->get_instancer()->update_mmis(-1, loc, false);
+	if (held != nullptr) {
+		const int slot = *held;
+		uint64_t start = Time::get_singleton()->get_ticks_usec();
+		_pool_upload(slot, loc, maps);
+		uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
+		_pool_upload_usec_last = usec;
+		_pool_upload_usec_total += usec;
+		_pool_upload_usec_max = MAX(_pool_upload_usec_max, usec);
+		if (_terrain->get_instancer() != nullptr) {
+			_terrain->get_instancer()->update_mmis(-1, loc, false);
+		}
+	} else if (is_in_region_window(loc)) {
+		_pool_attach(loc);
+	} else {
+		_pool_remember(loc, maps);
+		LOG(DEBUG, "Region ", loc, " resident outside the window (data only)");
 	}
 	if (_terrain->get_collision() != nullptr) {
 		_terrain->get_collision()->region_changed(loc);
@@ -740,44 +731,118 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 	return OK;
 }
 
-// Frees a region's slot and forgets the region. Streaming is a view of data held elsewhere:
-// eviction never writes the region to disk and does not mark a file for deletion. Save it
-// first (save_region) if it was edited and should persist.
+// Frees a region's slot, if it holds one, and forgets the region. Streaming is a view of
+// data held elsewhere: eviction never writes the region to disk and does not mark a file
+// for deletion. Save it first (save_region) if it was edited and should persist.
 Error Terrain3DData::evict_region(const Vector2i &p_region_loc, const bool p_update) {
 	ERR_FAIL_COND_V(!_streaming, FAILED);
-	if (!_slot_of.has(p_region_loc)) {
+	if (!_regions.has(p_region_loc)) {
 		LOG(ERROR, "No resident region at ", p_region_loc, " to evict");
 		return FAILED;
 	}
-	int slot = _slot_of[p_region_loc];
-	_slot_of.erase(p_region_loc);
-	_slot_locs[slot] = V2I_MAX;
-	_free_slots.push_back(slot);
-	int map_index = get_region_map_index(p_region_loc);
-	if (map_index >= 0) {
-		_region_map[map_index] = 0; // the stale texture layer is now unreachable
-	}
+	const bool had_slot = _slot_of.has(p_region_loc);
+	_pool_detach(p_region_loc);
 	_regions.erase(p_region_loc);
 	_pool_dirty.erase(p_region_loc);
+	_pool_synced.erase(p_region_loc);
 	int idx = _region_locations.find(p_region_loc);
 	if (idx >= 0) {
 		_region_locations.remove_at(idx);
 	}
 	_pool_evictions++;
-	// The region is gone from _regions, so the per region instancer update would skip it
-	// and leave its instances rendering; destroy its MMIs directly.
-	if (_terrain->get_instancer() != nullptr) {
-		_terrain->get_instancer()->destroy_mmis_by_region(p_region_loc);
-	}
 	if (_terrain->get_collision() != nullptr) {
 		_terrain->get_collision()->region_changed(p_region_loc);
 	}
-	LOG(DEBUG, "Evicted region ", p_region_loc, " from slot ", slot);
+	if (had_slot) {
+		_pool_fill_undrawn(); // a slot came free; give it to a region waiting in the window
+	}
+	LOG(DEBUG, "Evicted region ", p_region_loc);
 	_pool_signals_pending = true;
 	if (p_update) {
 		_pool_emit_signals();
 	}
 	return OK;
+}
+
+// Gives a resident region inside the window a slot: one upload per map type, the region
+// map entry, and its instancer meshes. With no free slot the region stays data only (it
+// keeps answering queries and collision) and is reported: a pool too small for what the
+// game keeps inside the window is a bug to fix, not to hide.
+bool Terrain3DData::_pool_attach(const Vector2i &p_loc) {
+	Terrain3DRegion *region = get_region_ptr(p_loc);
+	if (region == nullptr || _slot_of.has(p_loc)) {
+		return false;
+	}
+	Ref<Image> maps[3] = { region->get_height_map(), region->get_control_map(), region->get_active_color_map() };
+	if (_free_slots.is_empty()) {
+		if (!_pool_undrawn.has(p_loc)) {
+			_pool_undrawn.insert(p_loc);
+			LOG(ERROR, "Slot pool exhausted (", _slot_capacity, " slots): region ", p_loc,
+					" is inside the window but not drawn. Keep fewer regions inside the window or enable streaming with more slots.");
+		}
+		_pool_remember(p_loc, maps);
+		return false;
+	}
+	_pool_undrawn.erase(p_loc);
+	const int slot = _free_slots[_free_slots.size() - 1];
+	_free_slots.remove_at(_free_slots.size() - 1);
+	_slot_of[p_loc] = slot;
+	_slot_locs[slot] = p_loc;
+	int map_index = get_region_map_index(p_loc);
+	if (map_index >= 0) {
+		_region_map[map_index] = slot + 1;
+	}
+	uint64_t start = Time::get_singleton()->get_ticks_usec();
+	_pool_upload(slot, p_loc, maps);
+	uint64_t usec = Time::get_singleton()->get_ticks_usec() - start;
+	_pool_upload_usec_last = usec;
+	_pool_upload_usec_total += usec;
+	_pool_upload_usec_max = MAX(_pool_upload_usec_max, usec);
+	_pool_uploads++;
+	LOG(DEBUG, "Region ", p_loc, " drawn from slot ", slot, ", uploaded in ", usec, " us");
+	// Per region instancer build only; a rebuild would recreate every instance in the world.
+	if (_terrain->get_instancer() != nullptr) {
+		_terrain->get_instancer()->update_mmis(-1, p_loc, false);
+	}
+	return true;
+}
+
+// Takes a region's slot back (it left the window or is evicted). Its layer becomes
+// unreachable and its instancer meshes go: the per region instancer update skips regions
+// without a slot, so they would otherwise keep rendering.
+void Terrain3DData::_pool_detach(const Vector2i &p_loc) {
+	_pool_undrawn.erase(p_loc);
+	const int *held = _slot_of.getptr(p_loc);
+	if (held == nullptr) {
+		return;
+	}
+	const int slot = *held;
+	_slot_of.erase(p_loc);
+	_slot_locs[slot] = V2I_MAX;
+	_free_slots.push_back(slot);
+	int map_index = get_region_map_index(p_loc);
+	if (map_index >= 0 && _region_map[map_index] == slot + 1) {
+		_region_map[map_index] = 0;
+	}
+	if (_terrain->get_instancer() != nullptr) {
+		_terrain->get_instancer()->destroy_mmis_by_region(p_loc);
+	}
+}
+
+void Terrain3DData::_pool_fill_undrawn() {
+	if (_pool_undrawn.is_empty() || _free_slots.is_empty()) {
+		return;
+	}
+	Vector<Vector2i> waiting;
+	for (const Vector2i &loc : _pool_undrawn) {
+		waiting.push_back(loc);
+	}
+	for (const Vector2i &loc : waiting) {
+		if (_free_slots.is_empty()) {
+			break;
+		}
+		_pool_attach(loc);
+	}
 }
 
 // Consumers follow signals. The material re-sends the region map and slot locations (the
@@ -799,11 +864,12 @@ void Terrain3DData::_pool_emit_signals() {
 }
 
 // Barge Game addition. Moves the 32 x 32 region window so its minimum corner is p_origin.
-// The window only decides which resident regions the shaders can reach (draw); terrain
-// data and data queries do not depend on it while streaming. Only map entries of regions
-// entering or leaving the window change: no texture upload, no shader or collision rebuild.
-// Without streaming the window stays at the stock default, because classic region ids are
-// rebuilt from the window.
+// The window decides which resident regions the GPU holds and draws; terrain data, data
+// queries and collision do not depend on it while streaming. Resident regions leaving the
+// window give their slot back; resident regions entering it take one and upload their
+// three layers. Regions staying keep their slot and map entry. No shader or collision
+// rebuild. Without streaming the window stays at the stock default, because classic
+// region ids are rebuilt from the window.
 void Terrain3DData::set_region_window_origin(const Vector2i &p_origin) {
 	if (p_origin == _region_window_origin) {
 		return;
@@ -814,7 +880,20 @@ void Terrain3DData::set_region_window_origin(const Vector2i &p_origin) {
 					int64_t(p_origin.x) + REGION_MAP_SIZE - 1 > REGION_LOCATION_LIMIT ||
 					int64_t(p_origin.y) + REGION_MAP_SIZE - 1 > REGION_LOCATION_LIMIT,
 			vformat("Region window origin %s is beyond +-%d", p_origin, REGION_LOCATION_LIMIT));
+	Vector<Vector2i> leaving;
+	for (const KeyValue<Vector2i, int> &kv : _slot_of) {
+		const Vector2i rel = kv.key - p_origin;
+		if (rel.x < 0 || rel.y < 0 || rel.x >= REGION_MAP_SIZE || rel.y >= REGION_MAP_SIZE) {
+			leaving.push_back(kv.key);
+		}
+	}
+	for (const Vector2i &loc : leaving) {
+		_pool_detach(loc);
+	}
+	_pool_undrawn.clear(); // re-evaluated below against the new window
 	_region_window_origin = p_origin;
+	// Entries of regions that stay are unchanged (the index wraps by location); rebuild the
+	// table from the slots anyway, it is 1024 integers.
 	_region_map.fill(0);
 	for (const KeyValue<Vector2i, int> &kv : _slot_of) {
 		int map_index = get_region_map_index(kv.key);
@@ -822,10 +901,19 @@ void Terrain3DData::set_region_window_origin(const Vector2i &p_origin) {
 			_region_map[map_index] = kv.value + 1;
 		}
 	}
+	int entered = 0;
+	for (const Vector2i &loc : _region_locations) {
+		if (!_slot_of.has(loc) && is_in_region_window(loc)) {
+			entered += _pool_attach(loc) ? 1 : 0;
+		}
+	}
 	_pool_window_moves++;
-	LOG(DEBUG, "Region window origin set to ", p_origin);
+	LOG(DEBUG, "Region window origin set to ", p_origin, ": ", leaving.size(), " regions left, ", entered, " entered");
 	emit_signal("region_map_changed");
 	emit_signal("maps_changed");
+	if (entered > 0) {
+		emit_signal("height_maps_changed");
+	}
 }
 
 // Checks a region's maps against the allocated layers: texture_2d_update needs the exact
@@ -841,49 +929,64 @@ Error Terrain3DData::_pool_check_maps(const Vector2i &p_loc, const Ref<Image> p_
 	return OK;
 }
 
-void Terrain3DData::_pool_upload(const int p_slot, const Ref<Image> p_maps[3]) {
+void Terrain3DData::_pool_upload(const int p_slot, const Vector2i &p_loc, const Ref<Image> p_maps[3]) {
 	_generated_height_maps.update(p_maps[TYPE_HEIGHT], p_slot);
 	_generated_control_maps.update(p_maps[TYPE_CONTROL], p_slot);
 	_generated_color_maps.update(p_maps[TYPE_COLOR], p_slot);
-	for (int t = 0; t < 3; t++) {
-		_pool_uploaded_ids.set(p_slot * 3 + t, p_maps[t]->get_instance_id());
-	}
+	_pool_remember(p_loc, p_maps);
 }
 
-// update_maps() while streaming. Re-uploads the layers of resident regions that changed
-// since their upload: edited (flag), written through set_pixel / set_height and friends,
-// given new map images (region.set_height_map), or all of them when update_maps just
-// regenerated every colour map's mipmaps. Pixels written straight into a region's Image are not seen: mark
-// the region edited or add it again. Unchanged regions cost nothing, so the batched
+// Records which images a resident region had when it was last uploaded or, for a region
+// without a slot, last handed to collision, so update_maps() can spot new images.
+void Terrain3DData::_pool_remember(const Vector2i &p_loc, const Ref<Image> p_maps[3]) {
+	PoolSynced synced;
+	for (int t = 0; t < 3; t++) {
+		synced.ids[t] = p_maps[t].is_valid() ? uint64_t(p_maps[t]->get_instance_id()) : 0;
+	}
+	_pool_synced[p_loc] = synced;
+}
+
+// update_maps() while streaming. Picks up resident regions that changed since they were
+// last synced: edited (flag), written through set_pixel / set_height and friends, given new
+// map images (region.set_height_map), or all of them when update_maps just regenerated
+// every colour map's mipmaps. A drawn region re-uploads its layers; every changed region
+// refreshes collision. Pixels written straight into a region's Image are not seen: mark the
+// region edited or add it again. Unchanged regions cost nothing, so the batched
 // add_region(..., false) + update_maps() pattern stays cheap.
 void Terrain3DData::_pool_update_changed(const bool p_all_mipmaps_regenerated) {
 	if (!_generated_height_maps.get_rid().is_valid()) {
 		_pool_dirty.clear();
 		return;
 	}
-	for (const KeyValue<Vector2i, int> &kv : _slot_of) {
-		Terrain3DRegion *region = get_region_ptr(kv.key);
+	for (const Vector2i &loc : _region_locations) {
+		Terrain3DRegion *region = get_region_ptr(loc);
 		if (!region) {
 			continue;
 		}
 		Ref<Image> maps[3] = { region->get_height_map(), region->get_control_map(), region->get_active_color_map() };
-		bool changed = p_all_mipmaps_regenerated || region->is_edited() || _pool_dirty.has(kv.key);
+		bool changed = p_all_mipmaps_regenerated || region->is_edited() || _pool_dirty.has(loc);
+		const PoolSynced *synced = _pool_synced.getptr(loc);
 		for (int t = 0; t < 3 && !changed; t++) {
-			changed = maps[t].is_null() || maps[t]->get_instance_id() != _pool_uploaded_ids[kv.value * 3 + t];
+			changed = synced == nullptr || maps[t].is_null() || uint64_t(maps[t]->get_instance_id()) != synced->ids[t];
 		}
 		if (!changed) {
 			continue;
 		}
-		if (_pool_check_maps(kv.key, maps) != OK) {
+		if (_pool_check_maps(loc, maps) != OK) {
 			continue; // the old layer stays; the error says why
 		}
-		_pool_upload(kv.value, maps);
+		const int *slot = _slot_of.getptr(loc);
+		if (slot != nullptr) {
+			_pool_upload(*slot, loc, maps);
+		} else {
+			_pool_remember(loc, maps);
+		}
 		region->set_edited(false);
 		if (_terrain->get_collision() != nullptr) {
-			_terrain->get_collision()->region_changed(kv.key);
+			_terrain->get_collision()->region_changed(loc);
 		}
 		_pool_signals_pending = true;
-		LOG(DEBUG, "Re-uploaded changed resident region ", kv.key, " in slot ", kv.value);
+		LOG(DEBUG, "Synced changed resident region ", loc, slot ? " (uploaded)" : " (data only)");
 	}
 	_pool_dirty.clear();
 }
@@ -903,8 +1006,11 @@ Dictionary Terrain3DData::get_streaming_stats() const {
 	Dictionary stats;
 	stats["streaming"] = _streaming;
 	stats["slot_capacity"] = _slot_capacity;
-	stats["slots_used"] = _slot_capacity - _free_slots.size();
+	stats["slots_used"] = _slot_capacity - _free_slots.size(); // drawn regions
+	stats["regions_resident"] = int(_region_locations.size()); // drawn + data only
+	stats["regions_undrawn"] = int(_pool_undrawn.size()); // inside the window, no free slot
 	stats["inserts"] = int64_t(_pool_inserts);
+	stats["uploads"] = int64_t(_pool_uploads); // slot attachments (insert inside the window, or window reached it)
 	stats["evictions"] = int64_t(_pool_evictions);
 	stats["upload_usec_last"] = int64_t(_pool_upload_usec_last);
 	stats["upload_usec_max"] = int64_t(_pool_upload_usec_max);
@@ -914,11 +1020,7 @@ Dictionary Terrain3DData::get_streaming_stats() const {
 	stats["bytes_resident"] = _pool_bytes_per_slot * (_slot_capacity - _free_slots.size());
 	stats["window_origin"] = _region_window_origin;
 	stats["window_moves"] = int64_t(_pool_window_moves);
-	int in_window = 0;
-	for (const KeyValue<Vector2i, int> &kv : _slot_of) {
-		in_window += get_region_map_index(kv.key) >= 0 ? 1 : 0;
-	}
-	stats["slots_in_window"] = in_window;
+	stats["slots_in_window"] = int(_slot_of.size()); // every slot is inside the window
 	return stats;
 }
 
@@ -1056,7 +1158,7 @@ void Terrain3DData::update_maps(const MapType p_map_type, const bool p_all_regio
 
 	// If no maps have been rebuilt, update only individual regions in the array.
 	// Regions marked Edited have been changed by Terrain3DEditor::_operate_map or undo / redo processing.
-	if (!any_changed) {
+	if (!any_changed && !_streaming) {
 		for (const Vector2i &region_loc : _region_locations) {
 			const Terrain3DRegion *region = get_region_ptr(region_loc);
 			if (region && region->is_edited()) {
@@ -1226,7 +1328,7 @@ real_t Terrain3DData::get_region_blend(const Vector2 &p_uv2) const {
 }
 
 Vector3 Terrain3DData::get_normal(const Vector3 &p_global_position) const {
-	if (get_region_idp(p_global_position) < 0 || is_hole(get_control(p_global_position))) {
+	if (!has_regionp(p_global_position) || is_hole(get_control(p_global_position))) {
 		return V3_NAN;
 	}
 	const real_t step = _vertex_spacing;

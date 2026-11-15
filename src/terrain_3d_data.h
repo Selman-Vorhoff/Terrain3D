@@ -90,8 +90,11 @@ private:
 
 	// Barge Game addition: fixed slot pool ("streaming"), ported from the data layer of
 	// upstream draft PR #1004. See enable_streaming() in terrain_3d_data.cpp.
-	// While streaming, a region's id is a stable slot: its texture array layer and its index
-	// into _slot_locs. _region_locations stays the dense list of resident regions.
+	// While streaming, a region's id is its slot: its texture array layer and its index into
+	// _slot_locs. Only resident regions inside the region window hold a slot (they are the
+	// ones the GPU can draw); resident regions outside it are CPU data only, id -1, and get a
+	// slot when the window reaches them. _region_locations stays the dense list of every
+	// resident region; has_region and the data queries use residency, not the slot.
 	bool _streaming = false;
 	int _slot_capacity = 0;
 	Vector<int> _free_slots; // Free texture array layers, popped from the back
@@ -102,6 +105,7 @@ private:
 	Vector2i _region_window_origin = DEFAULT_REGION_WINDOW_ORIGIN;
 	// Pool statistics, see get_streaming_stats()
 	uint64_t _pool_inserts = 0;
+	uint64_t _pool_uploads = 0;
 	uint64_t _pool_evictions = 0;
 	uint64_t _pool_window_moves = 0;
 	uint64_t _pool_upload_usec_total = 0;
@@ -113,10 +117,18 @@ private:
 	Vector2i _pool_layer_size[3];
 	// Per slot, the instance ids of the three images last uploaded, so update_maps() can
 	// tell which resident regions got new map images.
-	Vector<uint64_t> _pool_uploaded_ids;
+	struct PoolSynced {
+		uint64_t ids[3] = { 0, 0, 0 };
+	};
+	HashMap<Vector2i, PoolSynced> _pool_synced; // per resident region: images last seen
 	HashSet<Vector2i> _pool_dirty; // resident regions changed through set_pixel
+	HashSet<Vector2i> _pool_undrawn; // resident, inside the window, but no free slot
 	Error _pool_check_maps(const Vector2i &p_loc, const Ref<Image> p_maps[3]) const;
-	void _pool_upload(const int p_slot, const Ref<Image> p_maps[3]);
+	void _pool_upload(const int p_slot, const Vector2i &p_loc, const Ref<Image> p_maps[3]);
+	void _pool_remember(const Vector2i &p_loc, const Ref<Image> p_maps[3]);
+	bool _pool_attach(const Vector2i &p_loc);
+	void _pool_detach(const Vector2i &p_loc);
+	void _pool_fill_undrawn();
 	void _pool_update_changed(const bool p_all_mipmaps_regenerated);
 	TypedArray<Image> _pool_resident_maps(const MapType p_type) const;
 
@@ -171,8 +183,11 @@ public:
 	int get_region_id(const Vector2i &p_region_loc) const;
 	int get_region_idp(const Vector3 &p_global_position) const;
 
-	bool has_region(const Vector2i &p_region_loc) const { return get_region_id(p_region_loc) != -1; }
-	bool has_regionp(const Vector3 &p_global_position) const { return get_region_idp(p_global_position) != -1; }
+	// Barge Game: while streaming, residency (a region slot is only held inside the window).
+	bool has_region(const Vector2i &p_region_loc) const {
+		return _streaming ? _regions.has(p_region_loc) : get_region_id(p_region_loc) != -1;
+	}
+	bool has_regionp(const Vector3 &p_global_position) const { return has_region(get_region_location(p_global_position)); }
 	Ref<Terrain3DRegion> get_region(const Vector2i &p_region_loc) const;
 	Terrain3DRegion *get_region_ptr(const Vector2i &p_region_loc) const;
 	template <typename T> // Catch invalid types. See note below in implementation.
@@ -304,9 +319,9 @@ inline Vector2i Terrain3DData::get_region_location(const Vector3 &p_global_posit
 }
 
 // Returns id of any active region. -1 if out of bounds or no region, or region id
-// Barge Game addition: while streaming the id is the region's slot, looked up by location, so
-// it does not depend on the region window. Data queries built on it (has_region, get_normal,
-// get_pixel...) answer the same wherever the window is.
+// Barge Game addition: while streaming the id is the region's slot (texture layer), looked
+// up by location; -1 for a resident region outside the window, which holds no slot. Use
+// has_region for residency.
 inline int Terrain3DData::get_region_id(const Vector2i &p_region_loc) const {
 	if (_streaming) {
 		const int *slot = _slot_of.getptr(p_region_loc);
