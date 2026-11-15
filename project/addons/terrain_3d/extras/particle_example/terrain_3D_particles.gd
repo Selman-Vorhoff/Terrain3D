@@ -230,6 +230,7 @@ func _update_process_parameters() -> void:
 			RenderingServer.material_set_param(process_rid, "_region_texel_size", 1.0 / terrain.region_size)
 			RenderingServer.material_set_param(process_rid, "_region_map_size", 32)
 			RenderingServer.material_set_param(process_rid, "_region_map", terrain.data.get_region_map())
+			RenderingServer.material_set_param(process_rid, "_region_map_origin", terrain.data.get_region_window_origin()) # Barge Game
 			RenderingServer.material_set_param(process_rid, "_region_locations", terrain.data.get_region_locations())
 			RenderingServer.material_set_param(process_rid, "_height_maps", terrain.data.get_height_maps_rid())
 			RenderingServer.material_set_param(process_rid, "_control_maps", terrain.data.get_control_maps_rid())

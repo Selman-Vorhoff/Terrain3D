@@ -112,3 +112,50 @@ Each change gets a section:
   exhaustion, refused operations. Run it with `--windowed` too: headless uses a dummy
   renderer and does not upload textures.
 - **Upstream:** draft PR #1004 covers the idea; our fixes above could go back to it.
+
+### 4. A region window placed by the game, not fixed at the origin
+
+- **What:** the 32 × 32 region map is a window whose minimum corner
+  (`Terrain3DData.set_region_window_origin`, default (−16, −16) = stock) the game places.
+  A region is drawn when `location − origin` lies in 0..31. Its map entry wraps around:
+  `((loc + 16) & 31)` per axis, so at the default origin the layout is byte-for-byte stock,
+  and moving the window only changes the entries of regions that enter or leave it (no
+  texture upload, no shader or collision rebuild). While streaming, regions can be added
+  at any location up to ±2^19 (`REGION_LOCATION_LIMIT`, so vertex coordinates stay inside
+  int32); resident regions outside the window stay loaded for data queries and collision
+  and are simply not drawn.
+- **Data queries do not depend on the window.** While streaming, `get_region_id` is the slot
+  looked up by location, so `has_region`, `get_normal`, `get_pixel`, `get_control`,
+  `get_region_idp` and the CPU region blend answer the same for every window position.
+  Collision already read regions by location.
+- **Classic mode is unchanged:** without `enable_streaming` the window stays at the stock
+  default (the setter refuses), and `add_region` still refuses locations outside −16..15,
+  because classic region ids are rebuilt from the window.
+- **Why:** stock addresses regions absolutely from the origin, which caps a 0.25 m world at
+  8 km (256 m regions). In co-op the camera is not the centre of the action, so the game
+  places the window (anchored on the barge) instead of a camera-following window.
+- **API changes:** `get_region_map_index` is an instance method now (it depends on the
+  window); new `set_region_window_origin`, `get_region_window_origin`, `is_in_region_window`;
+  `get_streaming_stats` reports `window_origin`, `window_moves`, `slots_in_window`.
+  `Terrain3DRegion.set_location` accepts any location within the limit.
+- **Shaders:** new uniform `_region_map_origin` (default `ivec2(-16)`) in `main.glsl` and
+  `displacement_buffer.glsl`; the lookup in `get_index_coord`, `get_index_uv`, the
+  displacement buffer, `check_region` (backgrounds) and the editor's region boundary box
+  uses the window. The addon's extra shaders (lightweight, minimum, particle example) got
+  the same lookup, and the particle example uploads the origin.
+- **Not changed:** the editor dummies in `ui.gd` compute stock indices, which match at the
+  default window, and the editor never moves it. Instancer meshes of resident regions
+  outside the window still render (they are not windowed).
+- **Files:** `src/terrain_3d_data.{h,cpp}`, `src/terrain_3d_region.cpp`,
+  `src/terrain_3d_material.cpp`, `src/shaders/{main,displacement_buffer,backgrounds,editor_functions}.glsl`,
+  `project/addons/terrain_3d/extras/shaders/{lightweight,minimum}.gdshader`,
+  `project/addons/terrain_3d/extras/particle_example/{particles.gdshader,terrain_3D_particles.gd}`.
+- **Test:** `project/tests/test_region_window.gd` (headless: classic refusals and stock
+  layout; regions at (±300, ±300), (300, −1234), (−5000, 4000); map invariants and
+  unchanged data queries at eight window positions including a 600 region jump; RIDs kept;
+  wraparound pair and eviction outside the window; collision far out independent of the
+  window; disk round trip with wide names; location limit).
+  `test_region_window_render.gd` and `test_extra_shaders.gd` (windowed only: the GPU draws a
+  region exactly when it is inside the window, including the wraparound case; the extra
+  shaders compile and follow the window). Golden test: worlds inside ±16 unchanged.
+- **Upstream:** none yet. Upstream #491 asks for this; a PR would follow #1004.

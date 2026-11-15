@@ -18,6 +18,12 @@ public: // Constants
 	static inline const real_t CURRENT_DATA_VERSION = 1.10f; // Current Data format version
 	static inline const int REGION_MAP_SIZE = 32;
 	static inline const Vector2i REGION_MAP_VSIZE = V2I(REGION_MAP_SIZE);
+	// Barge Game addition: the region map is a window whose minimum corner is placed by the
+	// game. The stock window is fixed at -16..15, which is this default.
+	static inline const Vector2i DEFAULT_REGION_WINDOW_ORIGIN = -REGION_MAP_VSIZE / 2;
+	// Region locations are limited so that location * region_size (2048 at most) stays
+	// within int32 vertex coordinates.
+	static inline const int REGION_LOCATION_LIMIT = 1 << 19;
 
 	enum HeightFilter {
 		HEIGHT_FILTER_NEAREST,
@@ -88,9 +94,12 @@ private:
 	HashMap<Vector2i, int> _slot_of; // Region location -> slot
 	TypedArray<Vector2i> _slot_locs; // Slot -> location; the shader's per layer table
 	bool _pool_signals_pending = false; // Inserted or evicted with p_update = false
+	// Barge Game addition: minimum corner of the 32 x 32 region window, see get_region_map_index()
+	Vector2i _region_window_origin = DEFAULT_REGION_WINDOW_ORIGIN;
 	// Pool statistics, see get_streaming_stats()
 	uint64_t _pool_inserts = 0;
 	uint64_t _pool_evictions = 0;
+	uint64_t _pool_window_moves = 0;
 	uint64_t _pool_upload_usec_total = 0;
 	uint64_t _pool_upload_usec_last = 0;
 	uint64_t _pool_upload_usec_max = 0;
@@ -128,7 +137,14 @@ public:
 	TypedArray<Terrain3DRegion> get_regions_active(const bool p_copy = false, const bool p_deep = false) const;
 	Dictionary get_regions_all() const { return _regions; }
 	PackedInt32Array get_region_map() const { return _region_map; }
-	static int get_region_map_index(const Vector2i &p_region_loc);
+	int get_region_map_index(const Vector2i &p_region_loc) const;
+	// Barge Game addition: the region window (see get_region_map_index)
+	void set_region_window_origin(const Vector2i &p_origin);
+	Vector2i get_region_window_origin() const { return _region_window_origin; }
+	bool is_in_region_window(const Vector2i &p_region_loc) const { return get_region_map_index(p_region_loc) >= 0; }
+	static bool is_valid_region_location(const Vector2i &p_region_loc) {
+		return ABS(p_region_loc.x) <= REGION_LOCATION_LIMIT && ABS(p_region_loc.y) <= REGION_LOCATION_LIMIT;
+	}
 
 	void do_for_regions(const Rect2i &p_area, const Callable &p_callback);
 	void change_region_size(int region_size);
@@ -245,18 +261,24 @@ VARIANT_ENUM_CAST(Terrain3DData::ExportMode);
 
 // Inline Region Functions
 
-// Verifies the location is within the bounds of the _region_map array and
-// the world, returning the _region_map index, which contains the region_id.
-// Valid region locations are -16, -16 to 15, 15, or when offset: 0, 0 to 31, 31
-// If any bits other than 0x1F are set, it's out of bounds and returns -1
-inline int Terrain3DData::get_region_map_index(const Vector2i &p_region_loc) {
-	// Offset world to positive values only
-	Vector2i loc = p_region_loc + (REGION_MAP_VSIZE / 2);
-	// Catch values > 31
-	if ((uint32_t(loc.x | loc.y) & uint32_t(~0x1F)) > 0) {
+// Verifies the location is within the region window, returning the _region_map index, which
+// contains the region_id (slot while streaming). Returns -1 outside the window.
+// Barge Game change: stock used a window fixed at -16..15. The window is now 32 x 32 regions
+// starting at _region_window_origin, and the entry is chosen by wraparound:
+// ((loc + 16) & 31) per axis. At the default origin (-16, -16) this is exactly stock's
+// layout; when the window moves, entries that stay in the window keep their index, so only
+// the entries of regions that enter or leave change. The shaders use the same formula.
+inline int Terrain3DData::get_region_map_index(const Vector2i &p_region_loc) const {
+	// Window relative position; any bit other than 0x1F set means outside 0..31.
+	// Computed in 64 bit so locations far from the origin cannot overflow.
+	int64_t rel_x = int64_t(p_region_loc.x) - _region_window_origin.x;
+	int64_t rel_y = int64_t(p_region_loc.y) - _region_window_origin.y;
+	if (((uint64_t(rel_x) | uint64_t(rel_y)) & ~uint64_t(0x1F)) != 0) {
 		return -1;
 	}
-	return loc.y * REGION_MAP_SIZE + loc.x;
+	const int half = REGION_MAP_SIZE / 2;
+	const int mask = REGION_MAP_SIZE - 1;
+	return ((p_region_loc.y + half) & mask) * REGION_MAP_SIZE + ((p_region_loc.x + half) & mask);
 }
 
 // Returns a region location given a global position. No bounds checking nor data access.
@@ -265,7 +287,14 @@ inline Vector2i Terrain3DData::get_region_location(const Vector3 &p_global_posit
 }
 
 // Returns id of any active region. -1 if out of bounds or no region, or region id
+// Barge Game addition: while streaming the id is the region's slot, looked up by location, so
+// it does not depend on the region window. Data queries built on it (has_region, get_normal,
+// get_pixel...) answer the same wherever the window is.
 inline int Terrain3DData::get_region_id(const Vector2i &p_region_loc) const {
+	if (_streaming) {
+		const int *slot = _slot_of.getptr(p_region_loc);
+		return slot ? *slot : -1;
+	}
 	int map_index = get_region_map_index(p_region_loc);
 	if (map_index >= 0) {
 		int region_id = _region_map[map_index] - 1; // 0 = no region

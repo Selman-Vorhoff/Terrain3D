@@ -714,6 +714,7 @@ void Terrain3DMaterial::_update_uniforms(const RID &p_material, const uint32_t p
 	}
 	RS->material_set_param(p_material, "_region_map", region_map);
 	RS->material_set_param(p_material, "_region_map_size", Terrain3DData::REGION_MAP_SIZE);
+	RS->material_set_param(p_material, "_region_map_origin", data->get_region_window_origin()); // Barge Game
 	if (Terrain3D::debug_level >= EXTREME) {
 		LOG(EXTREME, "Region map");
 		for (int i = 0; i < region_map.size(); i++) {

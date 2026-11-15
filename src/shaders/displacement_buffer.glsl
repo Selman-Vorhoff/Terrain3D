@@ -45,6 +45,9 @@ uniform float _region_size = 1024.0;
 uniform float _region_texel_size = 0.0009765625; // = 1./region_size
 uniform int _region_map_size = 32;
 uniform int _region_map[1024];
+// Barge Game: minimum corner of the region window; the entry index wraps around (see
+// Terrain3DData::get_region_map_index). The default is the stock window -16..15.
+uniform ivec2 _region_map_origin = ivec2(-16);
 //INSERT: MAX_REGIONS_64
 //INSERT: MAX_REGIONS_128
 //INSERT: MAX_REGIONS_256
@@ -97,8 +100,10 @@ struct material {
 // Z: layer index used for texturearrays, -1 if not in a region
 ivec3 get_index_coord(const vec2 uv) {
 	vec2 r_uv = round(uv);
-	ivec2 pos = ivec2(floor(r_uv * _region_texel_size)) + (_region_map_size / 2);
-	int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
+	ivec2 loc = ivec2(floor(r_uv * _region_texel_size));
+	ivec2 rel = loc - _region_map_origin; // Barge Game: window relative
+	int bounds = int(uint(rel.x | rel.y) < uint(_region_map_size));
+	ivec2 pos = (loc + _region_map_size / 2) & ivec2(_region_map_size - 1); // wraparound entry
 	int layer_index = _region_map[pos.y * _region_map_size + pos.x] * bounds - 1;
 	return ivec3(ivec2(mod(r_uv, _region_size)), layer_index);
 }
@@ -107,8 +112,10 @@ ivec3 get_index_coord(const vec2 uv) {
 // XY: (0. to 1.) coordinates within a region
 // Z: layer index used for texturearrays, -1 if not in a region
 vec3 get_index_uv(const vec2 uv2) {
-	ivec2 pos = ivec2(floor(uv2)) + (_region_map_size / 2);
-	int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
+	ivec2 loc = ivec2(floor(uv2));
+	ivec2 rel = loc - _region_map_origin; // Barge Game: window relative
+	int bounds = int(uint(rel.x | rel.y) < uint(_region_map_size));
+	ivec2 pos = (loc + _region_map_size / 2) & ivec2(_region_map_size - 1); // wraparound entry
 	int layer_index = _region_map[ pos.y * _region_map_size + pos.x ] * bounds - 1;
 	return vec3(uv2 - _region_locations[layer_index], float(layer_index));
 }

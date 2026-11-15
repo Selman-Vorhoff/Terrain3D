@@ -21,9 +21,11 @@ uniform float region_blend : hint_range(.001, 1., 0.001) = 0.25;
 //INSERT: FLAT_FUNCTIONS
 // Takes in UV2 region space coordinates, returns 1.0 or 0.0 if a region is present or not.
 float check_region(const vec2 uv2) {
-	ivec2 pos = ivec2(floor(uv2)) + (_region_map_size / 2);
-    int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
-    int raw_index = _region_map[pos.y * _region_map_size + pos.x] - 1;
+	ivec2 loc = ivec2(floor(uv2));
+	ivec2 rel = loc - _region_map_origin; // Barge Game: window relative
+	int bounds = int(uint(rel.x | rel.y) < uint(_region_map_size));
+	ivec2 pos = (loc + _region_map_size / 2) & ivec2(_region_map_size - 1); // wraparound entry
+	int raw_index = _region_map[pos.y * _region_map_size + pos.x] - 1;
     int is_valid = bounds * int(raw_index >= 0) * int(raw_index < MAX_REGIONS);
 	return float(is_valid);
 }

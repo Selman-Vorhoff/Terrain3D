@@ -61,6 +61,8 @@ uniform float _region_size = 1024.0;
 uniform float _region_texel_size = 0.0009765625; // = 1/REGION_SIZE
 uniform int _region_map_size = 32;
 uniform int _region_map[1024];
+// Barge Game: minimum corner of the region window (see Terrain3DData::get_region_map_index)
+uniform ivec2 _region_map_origin = ivec2(-16);
 uniform vec2 _region_locations[MAX_REGIONS];
 uniform highp sampler2DArray _height_maps : repeat_disable;
 uniform highp sampler2DArray _control_maps : repeat_disable;
@@ -72,16 +74,20 @@ uniform highp sampler2DArray _color_maps : repeat_disable;
 // Z: layer index used for texturearrays, -1 if not in a region
 ivec3 get_index_coord(const vec2 uv) {
 	vec2 r_uv = round(uv);
-	ivec2 pos = ivec2(floor(r_uv * _region_texel_size)) + (_region_map_size / 2);
-	int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
+	ivec2 loc = ivec2(floor(r_uv * _region_texel_size));
+	ivec2 rel = loc - _region_map_origin; // Barge Game: window relative
+	int bounds = int(uint(rel.x | rel.y) < uint(_region_map_size));
+	ivec2 pos = (loc + _region_map_size / 2) & ivec2(_region_map_size - 1); // wraparound entry
 	int layer_index = _region_map[pos.y * _region_map_size + pos.x] * bounds - 1;
 	return ivec3(ivec2(mod(r_uv, _region_size)), layer_index);
 }
 
 // Takes in UV2 region space coordinates, returns 1.0 or 0.0 if a region is present or not.
 float check_region(const vec2 uv2) {
-	ivec2 pos = ivec2(floor(uv2)) + (_region_map_size / 2);
-    int bounds = int(uint(pos.x | pos.y) < uint(_region_map_size));
+	ivec2 loc = ivec2(floor(uv2));
+	ivec2 rel = loc - _region_map_origin; // Barge Game: window relative
+	int bounds = int(uint(rel.x | rel.y) < uint(_region_map_size));
+	ivec2 pos = (loc + _region_map_size / 2) & ivec2(_region_map_size - 1); // wraparound entry
     int raw_index = _region_map[pos.y * _region_map_size + pos.x] - 1;
     int is_valid = bounds * int(raw_index >= 0) * int(raw_index < MAX_REGIONS);
 	return float(is_valid);

@@ -24,6 +24,7 @@ void Terrain3DData::_clear() {
 	_slot_locs.clear();
 	_pool_signals_pending = false;
 	_pool_bytes_per_slot = 0;
+	_region_window_origin = DEFAULT_REGION_WINDOW_ORIGIN;
 	_region_map_dirty = true;
 	_region_map.clear();
 	_region_map.resize(REGION_MAP_SIZE * REGION_MAP_SIZE);
@@ -636,8 +637,11 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 	ERR_FAIL_COND_V(!_streaming, FAILED);
 	ERR_FAIL_COND_V(p_region.is_null(), FAILED);
 	Vector2i loc = p_region->get_location();
+	// Barge Game: any location is accepted while streaming. Only regions inside the region
+	// window get a map entry (and are drawn); the rest stay resident for data queries.
+	ERR_FAIL_COND_V_MSG(!is_valid_region_location(loc), FAILED,
+			vformat("Region location %s is beyond +-%d", loc, REGION_LOCATION_LIMIT));
 	int map_index = get_region_map_index(loc);
-	ERR_FAIL_COND_V_MSG(map_index < 0, FAILED, vformat("Region location %s is out of bounds", loc));
 	ERR_FAIL_COND_V_MSG(p_region->get_region_size() != _region_size, FAILED,
 			vformat("Region %s is %d px but the pool is %d px", loc, p_region->get_region_size(), _region_size));
 	bool replacing = _slot_of.has(loc);
@@ -686,7 +690,9 @@ Error Terrain3DData::add_region_streamed(const Ref<Terrain3DRegion> &p_region, c
 	if (!_region_locations.has(loc)) {
 		_region_locations.push_back(loc);
 	}
-	_region_map[map_index] = slot + 1;
+	if (map_index >= 0) {
+		_region_map[map_index] = slot + 1;
+	}
 
 	uint64_t start = Time::get_singleton()->get_ticks_usec();
 	_generated_height_maps.update(maps[TYPE_HEIGHT], slot);
@@ -770,6 +776,34 @@ void Terrain3DData::_pool_emit_signals() {
 	}
 }
 
+// Barge Game addition. Moves the 32 x 32 region window so its minimum corner is p_origin.
+// The window only decides which resident regions the shaders can reach (draw); terrain
+// data and data queries do not depend on it while streaming. Only map entries of regions
+// entering or leaving the window change: no texture upload, no shader or collision rebuild.
+// Without streaming the window stays at the stock default, because classic region ids are
+// rebuilt from the window.
+void Terrain3DData::set_region_window_origin(const Vector2i &p_origin) {
+	if (p_origin == _region_window_origin) {
+		return;
+	}
+	ERR_FAIL_COND_MSG(!_streaming, "The region window can only move while streaming (enable_streaming)");
+	ERR_FAIL_COND_MSG(!is_valid_region_location(p_origin) ||
+					!is_valid_region_location(p_origin + REGION_MAP_VSIZE),
+			vformat("Region window origin %s is beyond +-%d", p_origin, REGION_LOCATION_LIMIT));
+	_region_window_origin = p_origin;
+	_region_map.fill(0);
+	for (const KeyValue<Vector2i, int> &kv : _slot_of) {
+		int map_index = get_region_map_index(kv.key);
+		if (map_index >= 0) {
+			_region_map[map_index] = kv.value + 1;
+		}
+	}
+	_pool_window_moves++;
+	LOG(DEBUG, "Region window origin set to ", p_origin);
+	emit_signal("region_map_changed");
+	emit_signal("maps_changed");
+}
+
 Dictionary Terrain3DData::get_streaming_stats() const {
 	Dictionary stats;
 	stats["streaming"] = _streaming;
@@ -782,6 +816,13 @@ Dictionary Terrain3DData::get_streaming_stats() const {
 	stats["upload_usec_mean"] = _pool_inserts > 0 ? double(_pool_upload_usec_total) / double(_pool_inserts) : 0.0;
 	stats["bytes_per_slot"] = _pool_bytes_per_slot; // CPU image bytes; GPU use is about the same
 	stats["bytes_allocated"] = _pool_bytes_per_slot * _slot_capacity;
+	stats["window_origin"] = _region_window_origin;
+	stats["window_moves"] = int64_t(_pool_window_moves);
+	int in_window = 0;
+	for (const KeyValue<Vector2i, int> &kv : _slot_of) {
+		in_window += get_region_map_index(kv.key) >= 0 ? 1 : 0;
+	}
+	stats["slots_in_window"] = in_window;
 	return stats;
 }
 
@@ -1061,8 +1102,8 @@ real_t Terrain3DData::get_region_blend(const Vector2 &p_uv2) const {
 	const real_t region_blend = var_rb;
 
 	auto check_region = [&](const Vector2 &uv2) -> real_t {
-		int idx = get_region_map_index(Vector2i(Math::floor(uv2.x), Math::floor(uv2.y)));
-		return (idx >= 0 && _region_map[idx] > 0) ? 1.f : 0.f;
+		// Barge Game: through has_region, which does not depend on the window while streaming
+		return has_region(Vector2i(Math::floor(uv2.x), Math::floor(uv2.y))) ? 1.f : 0.f;
 	};
 
 	// Floating point bias (must match shader)
@@ -1681,7 +1722,11 @@ void Terrain3DData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_regions_active", "copy", "deep"), &Terrain3DData::get_regions_active, DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_regions_all"), &Terrain3DData::get_regions_all);
 	ClassDB::bind_method(D_METHOD("get_region_map"), &Terrain3DData::get_region_map);
-	ClassDB::bind_static_method("Terrain3DData", D_METHOD("get_region_map_index", "region_location"), &Terrain3DData::get_region_map_index);
+	// Barge Game: an instance method now, because the index depends on the region window
+	ClassDB::bind_method(D_METHOD("get_region_map_index", "region_location"), &Terrain3DData::get_region_map_index);
+	ClassDB::bind_method(D_METHOD("set_region_window_origin", "origin"), &Terrain3DData::set_region_window_origin);
+	ClassDB::bind_method(D_METHOD("get_region_window_origin"), &Terrain3DData::get_region_window_origin);
+	ClassDB::bind_method(D_METHOD("is_in_region_window", "region_location"), &Terrain3DData::is_in_region_window);
 
 	ClassDB::bind_method(D_METHOD("do_for_regions", "area", "callback"), &Terrain3DData::do_for_regions);
 	ClassDB::bind_method(D_METHOD("change_region_size", "region_size"), &Terrain3DData::change_region_size);

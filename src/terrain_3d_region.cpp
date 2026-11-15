@@ -341,9 +341,10 @@ void Terrain3DRegion::set_location(const Vector2i &p_location) {
 		LOG(DEBUG, "Ignoring unset location ", p_location);
 		return;
 	}
-	if (Terrain3DData::get_region_map_index(p_location) < 0) {
-		LOG(ERROR, "Location ", p_location, " out of bounds. Max: ",
-				-Terrain3DData::REGION_MAP_SIZE / 2, " to ", Terrain3DData::REGION_MAP_SIZE / 2 - 1);
+	// Barge Game: any location is valid (the region window decides what is drawn); only
+	// locations so far out that vertex coordinates would overflow are refused.
+	if (!Terrain3DData::is_valid_region_location(p_location)) {
+		LOG(ERROR, "Location ", p_location, " out of bounds. Max: +-", Terrain3DData::REGION_LOCATION_LIMIT);
 		return;
 	}
 	// Marked modified if setting after initialized
